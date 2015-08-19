@@ -1,0 +1,5 @@
+ukb_binaries/
+dissect*
+dissect/*
+*pyc
+*~
