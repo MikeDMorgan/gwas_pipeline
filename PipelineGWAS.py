@@ -25,6 +25,11 @@ class FileGroup(object):
     * variant call format - .vcf and .bcf (including gzipped vcf)
     * Oxford format - .gen or .bgen with matched sample text file (must
                       be .sample)
+    * GRM_binary - genetic relationship matrix calculated in an appropriate
+      program in binary format.  File suffixes are *.grm.bin, *.grm.N.bin
+      and *.grmid
+    * GRM_gz - previously calcualted gzip compressed GRM, file suffixes
+      are *.grm.gz and *.grm.id
 
     Phenotypes are assumed to be contained in the relevant files, if not
     then an additional phenotypes files can be included using the
@@ -80,11 +85,14 @@ class FileGroup(object):
 
         for f in infiles:
             # get all input file prefixes
-            g = f.split("/")[-1]
-            fdir = f.split("/")[:-1]
-            fdir = "/".join(fdir)
-            ffile = fdir + "/" + g.split(".")[0]
-            file_prefixes.add(ffile)
+            if len(f.split("/")) > 1:
+                g = f.split("/")[-1]
+                fdir = f.split("/")[:-1]
+                fdir = "/".join(fdir)
+                ffile = fdir + "/" + g.split(".")[0]
+                file_prefixes.add(ffile)
+            else:
+                file_prefixes.add(f.split(".")[0])
 
         # if only prefix then use this for all data files
         if len(file_prefixes) == 1:
@@ -191,6 +199,30 @@ class FileGroup(object):
                 raise ValueError(".bcf file is missing, please "
                                  "specify")
 
+        elif self.file_format == "GRM_binary":
+            self.id_file = [ig for ig in infiles if re.search(".grm.id",
+                                                              ig)]
+            self.n_file = [gn for gn in infiles if re.search(".grm.N",
+                                                             gn)]
+            self.bin_file = [gb for gb in infiles if re.search(".grm.bin",
+                                                               gb)]
+            # check files exits
+            try:
+                assert self.id_file
+            except AssertionError:
+                raise ValueError("GRM ids file is missing, please "
+                                 "specify")
+            try:
+                assert self.n_file
+            except AssertionError:
+                raise ValueError("grm.N file is missing, please "
+                                 "specify")
+            try:
+                assert self.bin_file
+            except AssertionError:
+                raise ValueError("GRM binary file is missing, please "
+                                 "specify")
+           
 
 class GWASProgram(object):
     '''
@@ -233,6 +265,378 @@ class GWASProgram(object):
                                           cmd_postprocess))
 
         return statement
+
+
+class GCTA(GWASProgram):
+    '''
+    GCTA is designed for computing genetic relationship matrices, linear
+    mixed model analyses and phenotype estimation/prediction.
+    It can also perform SNP-wise GWAS.
+
+    Files MUST be in Plink binary format
+    '''
+
+    def __init__(self, files, options=None, settings=None,
+                 design=None):
+        self.infiles = files
+        self.options = options
+        self.settings = settings
+        self.design = design
+        self.executable = "gcta64"
+        self.statement = {}
+        self.filters = []
+
+    def program_call(self, infiles, outfile):
+        '''build GCTA call statement on infiles'''
+
+        statement = []
+        statement.append(self.executable)
+
+        if infiles.name:
+            inputs = self._build_single_file_input(infiles,
+                                                   infiles.file_format)
+            statement.append(inputs)
+        else:
+            raise AttributeError("Files must be in binary plink format "
+                                 "to use GCTA.  Please convert and "
+                                 "try again.")
+
+        self.statement["program"] = " ".join(statement)
+
+    def _build_single_file_input(self, infiles, file_format):
+        '''internal function only. Use it to construct the
+        file input flags with --file, --bfile or --data
+        '''
+
+        statement = None
+
+        if file_format == "plink":
+            statement = " --file %s " % infiles.name
+        elif file_format == "plink_binary":
+            statement = " --bfile %s " % infiles.name
+        elif file_format == "oxford" or file_format == "oxford_binary":
+            statement = " --data %s" % infiles.name
+        elif file_format == "GRM_binary":
+            statement = " --grm %s " % infiles.name
+        else:
+            raise AttributeError("file format is not defined or recognised."
+                                 "Please define the input corectly when "
+                                 "instantiating a FileGroup object")
+
+        return statement
+
+    def PCA(self, n_pcs="20"):
+        '''
+        Perform PCA analysis on previosly generated GRM, output the number n
+        principal componets, default = 20
+        '''
+
+        self._run_tasks(pca=n_pcs)
+
+    def filter_genotypes(self, filter_type, filter_value):
+        '''
+        * chromosome - exclude all variants not on the specified chromosome(s).
+          [str/list]
+        * autosome_number - for non-human species, the number of chromosomes to
+          be considered autosomes
+        * exclude_snps - text file list of variant IDs to exclude from analysis.
+          [file]
+        * extract - text file list of variant IDs to include in analysis,
+          ignores all others. [file]
+        * min_allele_frequency - only include SNPs with cohort/case allele
+          frequency above this threshold. [float]
+        * max_allele_frequency - include all SNPs with a MAF equal to or below
+          this value. [float]
+        '''
+
+        if filter_type == "chromosome":
+            self._construct_filters(chromosome=filter_value)
+        elif filter_type == "autosome_number":
+            self._construct_filters(autosome_number=filter_value)
+        elif filter_type == "exclude_snps":
+            self._construct_filters(exclude_snps=filter_value)
+        elif filter_type == "extract":
+            self._construct_filters(extract=filter_value)
+        elif filter_type == "min_allele_frequency":
+            self._construct_filters(min_allele_frequency=filter_value)
+        elif filter_type == "max_allele_frequency":
+            self._construct_filters(max_allele_frequency=filter_value)
+
+    def _construct_filters(self, **kwargs):
+        '''
+        Add filter to each GCTA run.
+
+        The filters accepted are defined below.  These are input as keyword
+        arguments supported by this function.
+
+        * min_allele_frequency - only include SNPs with cohort/case allele
+          frequency above this threshold. [float]
+        * max_allele_frequency - include all SNPs with a MAF equal to or below
+          this value. [float]
+        * keep - keep individuals with matching individual and family IDs.
+          [file]
+        * remove - remove all individuals with matching individual and family
+          IDs. [file]
+        * extract - text file list of variant IDs to include in analysis,
+          ignores all others. [file]
+        * exclude - text file list of variant IDs to exclude from analysis.
+          [file]
+        * chromosome - exclude all variants not on the specified chromosome(s).
+          [str/list]
+        * autosome - exclude all non-place and non-autosomal variants.
+          [boolean]
+        * covariates_file - specify the covariates file with family and
+          individual IDs in the first two columns.  Covariates are in the
+          (n+2)th column. Only used in conjunction with `covariate_filter`.
+          [file]
+        * covariate_filter - covariate columns value to filter on.  Can be
+          used with non-numeric values to filter out individuals with
+          covariate =/= `covariate_filter` value. [str/int/float]
+        * covariate_column - column number to apply filtering to if more
+          than one covariate in the file. [int]
+        * update_gender - provide gender information in a separate text
+          file. [file]
+        * grm_threshold - remove one of a pair of individuals with
+          estimated relatedness greater than this value.
+        * ld_significance - p-value threshold for regression test
+          of LD significance
+        * genotype_call - GenCall score cut-off for calling raw
+          genotypes into Plink PED format
+        * meta_pval - p-value threshold cut-off for conditional
+          and joint genome-wide analysis
+        * cojo_window - distance in kb beyond wich SNPs this
+          distance apart are assumed to be in linkage equilibrium
+        * cojo_collinear - multiple regression R^2 on selected SNPs
+          value above which the testing SNP will not be selected.
+        * cojo_inflation - adjust COJO analysis test statistics
+          for genomic control. [boolean]
+        * reml_iterations - maximum number of iterations to use
+          during reml analysis.  Default is 100. [int]
+        '''
+
+        statement = []
+
+        # map of keyword arguments recognised to Plink2 filtering flags
+        filter_map = {"min_allele_frequency": " --maf %s ",
+                      "max_allele_frequency": " --max-maf %s ",
+                      "keep": " --keep %s ",
+                      "remove": " --remove %s ",
+                      "extract": " --extract %s ",
+                      "exclude": " --exclude %s ",
+                      "chromosome": " --chr %s ",
+                      "autosome": " --autosome ",
+                      "autosome_number": " --autosome-num %s ",
+                      "grm_threshold": " --grm-cutoff %s ",
+                      "ld_significance": " --ls-sig %s ",
+                      "genotype_call": " --gencall %s ",
+                      "meta_pval": " --cojo-p %s ",
+                      "cojo_window": " --cojo-wind %s ",
+                      "cojo_collinear": " --cojo-collinear %s ",
+                      "cojo_inflation": " --cojo-gc ",
+                      "reml_iterations": " --reml-maxit %s "}
+
+        # compile all filters together, checking for dependencies.
+        # use a mapping dictionary to extract the relevant flags and
+        # combinations to use.
+        filters = []
+        filter_dict = {}
+        for key, value in kwargs.iteritems():
+            filter_dict[key] = value
+
+        for each in filter_dict.keys():
+            try:
+                assert filter_map[each]
+                # check for data type <- behaviour is type dependent
+                if type(filter_dict[each]) == 'bool':
+                    filters.append(filter_map[each])
+                else:
+                    filter_val = filter_dict[each]
+                    filters.append(filter_map[each] % filter_val)
+
+            except KeyError:
+                E.warn("%s filter not recognised, please see "
+                       "documentation for allowed filters" % each)
+                pass
+                
+        self.filters.append(" ".join(filters))
+        self.statement["filters"] = " ".join(self.filters)
+
+    def _run_tasks(self, parameter=None, **kwargs):
+        '''
+        The principal functions of GCTA revolve around GRM estimation
+        and variance components analysis, such as REML estimation of
+        heritability and variance components, BLUP and phenotype prediciton.
+
+        It can also be used to do PCA and conditional and joint GWAS.
+
+        Tasks
+        -----
+        * pca - perform principal components analysis on a GRM
+        * greml - perform restricted maximum likelihood analysis
+          for estimation of variance components
+        * estimate_ld - estimate the linkage disequilibrium structure
+          over the genomic regions specified
+        * simulate_gwas - simulate genome-wide association data based
+          on observed genotype data
+        * cojo - conditional and joint genome-wide association
+          analysis across SNPs and covariates
+        * bivariate_reml - perform GREML on two traits, either both
+          binary, both quantitative or one of each
+        * lmm - perform a linear mixed model based association analysis
+        '''
+
+        statement = []
+
+        # set up a dictionary of recognised tasks with key word argument
+        # values as further dictionaries. Use the parameter argument
+        # to pass arguments by value to string formatting
+
+        # put all of the other tasks as options in the calling function
+
+        task_map = {"pca": " --pca %s ",
+                    "greml": {"standard": " --reml ",
+                              "priors": " --reml --reml-priors %s ",
+                              "reml_algorithm": " --reml --reml-alg %s ",
+                              "unconstrained": " --reml --reml-no-constrain ",
+                              "GxE": " --reml --gxe %s ",
+                              "LRT": " --reml --reml-lrt %s ",
+                              "BLUP_EBV": " --reml --reml-pred-rand ",
+                              "snpBLUP": " --blup-snp "},
+                    "estimate_ld": " --ld %s ",
+                    "simulate_gwas": {"quantitative": " --simu-qt ",
+                                      "case_control": " --simu-cc %s %s "},
+                    "cojo": {"stepwise": " --cojo-file %s --cojo-slct ",
+                             "no_selection": " --cojo-file %s --cojo-joint ",
+                             "snp_conditional": " --cojo-file %s --cojo-cond %s "},
+                    "bivariate_reml": {"standard": " --reml-bivar %s ",
+                                       "no_residual": " --reml-bivar %s --reml-bivar-nocove ",
+                                       "fixed_cor": " --reml-bivar %s --reml-bivar-lrt-rg %s "},
+                    "lmm": {"standard": " --mlma ",
+                            "loco": " --mlma-loco ",
+                            "covar": " --mlma-no-adj-covar "}}
+
+        for task, value in kwargs.iteritems():
+            # check for PCA first as it is not nested in task_map
+            if task == "pca":
+                try:
+                    state = task_map[task] % value
+                    statement.append(state)
+                except TypeError:
+                    statement.append(task_map[task])
+                statement.append
+            # LD estimation is likewise not nested
+            elif task == "estimate_ld":
+                try:
+                    state = task_map[task] % value
+                    statement.append(state)
+                except TypeError:
+                    raise IOError("no SNP file list detected")
+            elif task != "parameter":
+                try:
+                    # sub_task is a nested dictionary
+                    sub_task = task_map[task]
+                    try:
+                        assert sub_task[value]
+                        try:
+                            # some tasks do not contain task values for the
+                            # parameter argument - catch these with the TypeError
+                            # exception
+                            statement.append(sub_task[value] % parameter)
+
+                            # the default for parameter is None, check this is appropriate
+                            if not parameter:
+                                E.warn("Parameter value is set to NoneType. "
+                                       "Please check this is an appropriate value "
+                                       "to pass for this task")
+                            else:
+                                pass
+                        except TypeError:
+                            statement.append(sub_task[value])
+                    except KeyError:
+                        raise KeyError("% Task not recognised, see docs for details of "
+                                       "recognised tasks" % task)                    
+                except KeyError:
+                    raise KeyError("Task not recognised, see docs for details of "
+                                   "recognised tasks")
+            else:
+                pass
+
+        self.statement["tasks"] = " ".join(statement)
+
+    def genetic_relationship_matrix(self, compression="binary", metric=None,
+                                    shape="square", options=None):
+        '''
+        Calculate the estimated genetic relationship matrix from
+        genotyping data
+
+        * estimate_grm - estimate the realized genetic relationship
+          matrix between individuals from genotyping data
+        '''
+
+        mapf = {"binary": " --make-grm-bin ",
+                "gzip": " --make-grm-gz ",
+                "no_compress": " --make-grm ",
+                "X_chr": " --make-grm-chr ",
+                "X_chr_gz": " --make-grm-gz ",
+                "inbreeding": " --ibc "}
+
+        if options == "X_chr":
+            if compression == "gz":
+                state = mapf["X_chr_gz"]
+            else:
+                state = mapf["X_chr"]
+        elif options == "inbreding":
+            state = mapf["inbreeding"]
+        else:
+            pass
+
+        # check compression is compatible
+        if compression == "gz":
+            state = mapf["gzip"]
+        elif compression == "bin":
+            state = mapf["binary"]
+        elif compression is None and not options:
+            state = mapf["no_compress"]
+
+        self.statement["matrix"] = state       
+
+    def build_statement(self, infiles, outfile, threads=None):
+        '''
+        Build statement and execute from components
+        '''
+
+        statement = []
+        exec_state = self.executable
+        # calls to function add to the self.statement dictionary
+        try:
+            statement.append(self.statement["program"])
+        except KeyError:
+            raise AttributeError("Input files and format not detected")
+            
+        try:
+            statement.append(self.statement["filters"])
+        except KeyError:
+            pass
+
+        try:
+            statement.append(self.statement["tasks"])
+        except KeyError:
+            pass
+        
+        try:
+            statement.append(self.statement["matrix"])
+        except KeyError:
+            pass
+
+        if threads:
+            statement.append(" --thread-num %i " % threads)
+        else:
+            pass
+
+        # add output flag
+        statement.append(" --out %s " % outfile)
+
+        os.system(" ".join(statement))
 
 
 class Plink2(GWASProgram):
@@ -1078,6 +1482,8 @@ class Plink2(GWASProgram):
         a subset of samples which can then be projected on
         to other samples.
         '''
+
+        # FINISH ME!!!!
 
     def _matrices(self, matrix_type, shape="triangle", compression=None, options=None):
         '''

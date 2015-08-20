@@ -60,7 +60,8 @@ def main(argv=None):
 
     parser.add_option("--input-file-format", dest="file_format", type="choice",
                       choices=["plink", "plink_binary", "oxford",
-                               "oxford_binary", "vcf"],
+                               "oxford_binary", "vcf", "GRM_binary",
+                               "GRM_gz"],
                       help="format of input files")
 
     parser.add_option("--phenotypes-file", dest="pheno_file", type="string",
@@ -81,8 +82,12 @@ def main(argv=None):
                       help="model to report from association analysis")
 
     parser.add_option("--method", dest="method", type="choice",
-                      choices=["association", "summary", "format", "matrix"],
+                      choices=["association", "summary", "format", "matrix",
+                               "reml", "pca", "lmm", "simulation"],
                       help="method to apply to genome-wide data")
+
+    parser.add_option("--principal-components", dest="num_pcs", type="int",
+                      help="the number of principal components to output")
 
     parser.add_option("--matrix-shape", dest="matrix_shape", type="choice",
                       choices=["triangle", "square", "square0"],
@@ -326,6 +331,10 @@ def main(argv=None):
         gwas_object = gwas.Plink2(files=geno_files)
         gwas_object.program_call(infiles=geno_files,
                                  outfile=options.out_pattern)
+    elif options.program == "gcta":
+        gwas_object = gwas.GCTA(files=geno_files)
+        gwas_object.program_call(infiles=geno_files,
+                                 outfile=options.out_pattern)
     else:
         pass
 
@@ -359,6 +368,8 @@ def main(argv=None):
             gwas_object._output_statistics(wrights_fst=options.sum_param)
         else:
             pass
+    elif options.method == "pca":
+        gwas_object.PCA(n_pcs=options.num_pcs)
     elif options.method == "association":
         gwas_object.run_association(association=options.assoc_method,
                                     permutation=options.permutation,
@@ -419,7 +430,8 @@ def main(argv=None):
         elif options.matrix_form == "grm":
             gwas_object.genetic_relationship_matrix(shape=options.matrix_shape,
                                                     compression=options.matrix_compress,
-                                                    metric=options.matrix_metric)
+                                                    metric=options.matrix_metric,
+                                                    options=options.matrix_options)
     else:
         pass
 
