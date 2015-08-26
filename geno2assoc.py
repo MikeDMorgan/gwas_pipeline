@@ -271,6 +271,14 @@ def main(argv=None):
                       help="comma separated list of from, to genome co-ordinates "
                       "within which to include variants for analysis")
 
+    parser.add_option("--conditional-snp", dest="filt_conditional_snp", type="string",
+                      help="condition the analysis on this SNP ID.  Can only be "
+                      "used in the linear and logistic regression models.")
+
+    parser.add_option("--snp-id-range", dest="filt_snp_id_range", type="string",
+                      help="comma separate list of IDs from, to within which "
+                      "to include variants for analysis.")
+
     parser.add_option("--snp-id", dest="filt_specific_snp", type="string",
                       help="include a single snp in the analysis given by "
                       "it's variant ID.")
@@ -291,7 +299,7 @@ def main(argv=None):
                       "--include/exclude snp options.  variants within +/- "
                       "half * window_size (kb) are included")
 
-    parser.add_option("--range-resolution", dest="range_resolution", type="choice",
+    parser.add_option("--range-resolution", dest="filt_range_resolution", type="choice",
                       choices=["bp", "kb", "mb"],
                       help="alters the (from, to) range resolution to either bp, "
                       "kb or mb")
@@ -314,7 +322,8 @@ def main(argv=None):
                         matrix_shape="triangle",
                         matrix_options=None,
                         matrix_compress="gz",
-                        random_seed=random.randint(0, 19999))
+                        random_seed=random.randint(0, 19999),
+                        sample_update=None)
 
     if not options.infile_pattern:
         infiles = (argv[-1]).split(",")
@@ -325,6 +334,11 @@ def main(argv=None):
     geno_files = gwas.FileGroup(files=infiles,
                                 file_format=options.file_format,
                                 genotype_format="imputed")
+    if options.pheno_file:
+        geno_files.set_phenotype(pheno_file=options.pheno_file,
+                                 pheno=options.pheno)
+    else:
+        pass
 
     # add FileGroup object to the gwas program object
     if options.program == "plink2":
@@ -343,10 +357,11 @@ def main(argv=None):
     filter_keys = [fx for fx in opt_dict.keys() if re.search("filt", fx)]
     filter_dict = {k: options.__dict__[k] for k in filter_keys if opt_dict[k]}
 
-    # iteratively add filters to GWASProgram object
+    # iteratively add genotype filters to GWASProgram object
     for fkey in filter_dict:
         filt_key = fkey.lstrip("filt_")
         filter_value = filter_dict[fkey]
+        print filt_key
         gwas_object.filter_genotypes(filter_type=filt_key,
                                      filter_value=filter_value)
 
@@ -377,8 +392,21 @@ def main(argv=None):
                                     random_seed=options.random_seed)
     elif options.method == "format":
         if options.format_method == "change_format":
-            gwas_object._run_tasks(change_format=options.reformat,
-                                   parameter=options.format_param)
+            # adding filtering options to plink requires the --make-bed flag
+            try:
+                update_samples = opt_dict["sample_update"]
+                if update_samples:
+                    E.info("updating samples from %s" % options.format_param)
+                    gwas_object._run_tasks(change_format=options.reformat,
+                                           parameter=options.format_param)
+                    gwas_object._run_tasks(update_samples=options.sample_update,
+                                           parameter=options.format_param)
+                else:
+                    gwas_object._run_tasks(change_format=options.reformat,
+                                           parameter=options.format_param)
+            except KeyError:
+                gwas_object._run_tasks(change_format=options.reformat,
+                                       parameter=options.format_param)                
         elif options.format_method == "change_missing_values":
             gwas_object._run_tasks(change_missing_values=options.apply_missing,
                                    parameter=options.format_param)

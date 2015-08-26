@@ -149,24 +149,299 @@ def connect():
 
     return dbh
 
+# ---------------------------------------------------
+# load the UKBiobank phenotype data into an SQLite DB
+# use this as the main accessor of phenotype data
+# for the report and non-genetic analyses
+@follows(mkdir("phenotypes.dir"))
+@transform("%s/*.tab" % PARAMS['data_dir'],
+           regex("%s/(.+).tab" % PARAMS['data_dir']),
+           add_inputs(r"%s/\1.r" % PARAMS['data_dir']),
+           r"phenotypes.dir/\1.tsv")
+def formatPhenotypeData(infiles, outfile):
+    '''
+    Use the UKBiobank encoding dictionary/R script to
+    set the factor levels for phenotype data
+    '''
+
+    pheno_file = infiles[0]
+    r_file = infiles[1]
+
+    statement = '''
+    python /ifs/devel/projects/proj045/gwas_pipeline/pheno2pheno.py
+    --task=set_factors
+    --R-script=%(r_file)s
+    %(pheno_file)s
+    > %(outfile)s
+    '''
+
+    P.run()
+
+@follows(formatPhenotypeData)
+@transform(formatPhenotypeData,
+           suffix(".tsv"),
+           ".load")
+def loadPhenotypes(infile, outfile):
+    '''
+    load all phenotype data in to an SQLite DB
+    '''
+
+    P.load(infile, outfile)
 
 # ---------------------------------------------------
 # Specific pipeline tasks
-@follows(mkdir("gwas.dir"))
-@collate("%s/*" % PARAMS['data_dir'],
-         regex("%s/(.+).(...+)" % PARAMS['data_dir']),
+@follows(mkdir("plink.dir"),
+         loadPhenotypes)
+@collate("%s/*.bgen" % PARAMS['data_dir'],
+         regex("%s/(.+)\.(.+)" % PARAMS['data_dir']),
+         add_inputs("%s/*.sample" % PARAMS['data_dir']),
+         r"plink.dir/\1.bed")
+def convertToPlink(infiles, outfiles):
+    '''
+    Convert from Oxford binary (BGEN) format
+    to Plink binary format.  One bed file
+    per chromosome - keep the fam files the same
+    '''
+
+    job_threads = int(PARAMS['data_threads'])
+    job_memory = "10G"
+    infiles = ",".join([x for x in infiles[0]])
+
+    log_out = outfiles.split(".")[0]
+    out_pattern=outfiles.split(".")[0]
+
+    statement = '''
+    python /ifs/devel/projects/proj045/gwas_pipeline/geno2assoc.py
+    --program=plink2
+    --input-file-format=%(data_format)s
+    --phenotypes-file=%(data_phenotypes)s
+    --pheno=%(format_pheno)s
+    --update-sample-attribute=gender
+    --format-parameter=%(format_gender)s
+    --method=format
+    --format-method=change_format
+    --reformat-type=plink_binary
+    --output-file-pattern=%(out_pattern)s
+    --log=%(log_out)s.log
+    --threads=%(job_threads)i
+    %(infiles)s
+    '''
+
+    P.run()
+
+if PARAMS['candidate_region']:
+    @follows(convertToPlink,
+             mkdir("candidate.dir"))
+    @transform(convertToPlink,
+               regex("plink.dir/%s(.+).bed" % PARAMS['candidate_chromosome']),
+               add_inputs([r"plink.dir/%s\1.fam" % PARAMS['candidate_chromosome'],
+                           r"plink.dir/%s\1.bim" % PARAMS['candidate_chromosome']]),
+               r"candidate.dir/%s\1-candidate_region.bed" % PARAMS['candidate_chromosome'])
+    def getCandidateRegion(infiles, outfile):
+        '''
+        Pull out genotyping data on individuals over a
+        candidate region for testing.
+        '''
+
+        bed_file = infiles[0]
+        fam_file = infiles[1][0]
+        bim_file = infiles[1][1]
+        plink_files = ",".join([bed_file, fam_file, bim_file])
+
+        region = ",".join(PARAMS['candidate_region'].split(":")[-1].split("-"))
+        out_pattern = ".".join(outfile.split(".")[:-1])
+
+        statement = '''
+        python /ifs/devel/projects/proj045/gwas_pipeline/geno2assoc.py
+        --program=plink2
+        --input-file-format=plink_binary
+        --method=format
+        --restrict-chromosome=%(candidate_chromosome)s
+        --snp-range=%(region)s
+        --format-method=change_format
+        --format-parameter=%(format_gender)s
+        --update-sample-attribute=gender
+        --reformat-type=plink_binary
+        --output-file-pattern=%(out_pattern)s
+        --log=%(outfile)s.log
+        %(plink_files)s
+        '''
+
+        P.run()
+
+    @follows(getCandidateRegion)
+    @transform(getCandidateRegion,
+               regex("candidate.dir/(.+).bed"),
+               add_inputs([r"candidate.dir/\1.fam",
+                           r"candidate.dir/\1.bim"]),
+               r"candidate.dir/\1_assoc.assoc")
+    def testCandidateRegion(infiles, outfile):
+        '''
+        Test the candidate region for association using
+        Plink basic association - i.e. not a model-specific
+        analysis
+        '''
+
+        bed_file = infiles[0]
+        fam_file = infiles[1][0]
+        bim_file = infiles[1][1]
+        plink_files = ",".join([bed_file, fam_file, bim_file])
+
+        out_pattern = ".".join(outfile.split(".")[:-1])
+
+        job_threads = PARAMS['candidate_threads']
+        job_memory = PARAMS['candidate_memory']
+
+        statement = '''
+        python /ifs/devel/projects/proj045/gwas_pipeline/geno2assoc.py
+        --program=plink2
+        --input-file-format=plink_binary
+        --method=association
+        --association-method=assoc
+        --genotype-rate=0.01
+        --indiv-missing=0.01
+        --hardy-weinberg=0.0001
+        --min-allele-frequency=0.001
+        --output-file-pattern=%(out_pattern)s
+        --threads=%(candidate_threads)s
+        --log=%(outfile)s.log
+        -v 5
+        %(plink_files)s
+        '''
+
+        P.run()
+
+    @follows(testCandidateRegion)
+    @transform(getCandidateRegion,
+               regex("candidate.dir/(.+).bed"),
+               add_inputs([r"candidate.dir/\1.fam",
+                           r"candidate.dir/\1.bim"]),
+               r"candidate.dir/\1_conditional.%s" % PARAMS['conditional_model'])
+    def conditionalTestRegion(infiles, outfile):
+        '''
+        Perform association analysis conditional on
+        top SNP from previous analysis
+        '''
+
+        bed_file = infiles[0]
+        fam_file = infiles[1][0]
+        bim_file = infiles[1][1]
+        plink_files = ",".join([bed_file, fam_file, bim_file])
+
+        out_pattern = ".".join(outfile.split(".")[:-1])
+
+        statement = '''
+        python /ifs/devel/projects/proj045/gwas_pipeline/geno2assoc.py
+        --program=plink2
+        --input-file-format=plink_binary
+        --method=association
+        --association-method=logistic
+        --genotype-rate=0.1
+        --indiv-missing=0.1
+        --hardy-weinberg=0.0001
+        --conditional-snp=rs12924101
+        --min-allele-frequency=0.01
+        --output-file-pattern=%(out_pattern)s
+        --threads=%(pca_threads)s
+        --log=%(outfile)s.log
+        -v 5
+        %(plink_files)s
+        '''
+        
+        P.run()
+else:
+    pass
+
+@follows(convertToPlink,
+         mkdir("grm.dir"))
+@transform("plink.dir/*.*",
+           regex("plink.dir/(.+).bed"),
+           add_inputs([r"plink.dir/\1.fam",
+                       r"plink.dir/\1.bim"]),
+           r"grm.dir/\1.grm.N.bin")
+def makeGRM(infiles, outfiles):
+    '''
+    Calculate the realised GRM per chromosome from
+    Plink binary format files
+    No filtering at this stage?
+    '''
+
+    job_threads = PARAMS['grm_threads']
+    job_memory = "10G"
+
+    bed_file = infiles[0]
+    fam_file = infiles[1][0]
+    bim_file = infiles[1][1]
+
+    plink_files = ",".join([bed_file, fam_file, bim_file])
+    out_pattern = ".".join(outfiles.split(".")[:-4])
+
+    statement = '''
+    python /ifs/devel/projects/proj045/gwas_pipeline/geno2assoc.py
+    --program=gcta
+    --input-file-format=plink_binary
+    --method=matrix
+    --method-compression=bin
+    --matrix-form=grm
+    --output-file-pattern=%(out_pattern)s
+    --threads=%(grm_threads)s
+    %(plink_files)s
+    '''
+
+    print out_pattern
+
+
+@follows(makeGRM,
+         mkdir("pca.dir"))
+@transform("grm.dir/*.grm.bin",
+           regex("grm.dir/(.+).grm.bin"),
+           add_inputs([r"grm.dir/\1.grm.N.bin",
+                       r"grm.dir/\1.grm.id"]),
+           r"pca.dir/\1.eigenvec")
+def runPCA(infiles, outfile):
+    '''
+    Run PCA on GRM(s)
+    '''
+
+    job_threads = PARAMS['pca_threads']
+    n_file = infiles[0]
+    bin_file = infiles[1][0]
+    id_file = infiles[1][1]
+
+    grm_files = ",".join([n_file, bin_file, id_file])
+
+    out_pattern = outfiles.split(".")[-2]
+
+    statement = '''
+    python /ifs/devel/projects/proj045/gwas_pipeline/geno2assoc.py
+    --program=gcta
+    --input-file-format=GRM_binary
+    --method=pca
+    --principal-components=%(pca_components)i
+    --threads=%(job_threads)s
+    --output-file-pattern=%(out_pattern)s
+    %(grm_files)s
+    '''
+
+    print grm_files
+    
+@follows(convertToPlink,
+         mkdir("gwas.dir"))
+@collate("plink.dir/chr16impv1*",
+         regex("plink.dir/(.+).(...+)"),
          r"gwas.dir/test_assoc-\1.assoc")
 def test_association(infiles, outfile):
     '''
-    Run a test association
+    Run a test association on chromosome 16
     '''
 
-    job_memory = "64G"
+    job_memory = "5G"
+    job_threads = PARAMS['pca_threads']
 
     infiles = ",".join(infiles)
 
     statement = '''
-    python /ifs/devel/projects/proj045/geno2assoc.py
+    python /ifs/devel/projects/proj045/gwas_pipeline/geno2assoc.py
     --program=plink2
     --input-file-format=plink_binary
     --method=association
@@ -176,11 +451,10 @@ def test_association(infiles, outfile):
     --hardy-weinberg=0.0001
     --min-allele-frequency=0.01
     --output-file-pattern=gwas.dir/test_assoc
-    --threads=12
+    --threads=%(pca_threads)s
     --log=%(outfile)s.log
     -v 5
     %(infiles)s
-    > %(outfile)s
     '''
 
     P.run()
@@ -201,6 +475,7 @@ def test_dissect(infiles, outfile):
     job_queue = "mpi.q"
     cluster_parallel_environment = " mpi "
     statement = '''
+    mpirun --np %(job_threads)s
     dissect
     --gwas
     --bfile data.dir/chr22impv1u

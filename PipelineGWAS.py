@@ -105,9 +105,9 @@ class FileGroup(object):
         # define file types by their suffix instead
         if self.file_format == "plink":
             self.ped_file = [pf for pf in infiles if re.search(".ped",
-                                                               pf)]
+                                                               pf)][0]
             self.map_file = [mf for mf in infiles if re.search(".map",
-                                                               mf)]
+                                                               mf)][0]
 
             # check files exist (i.e. are not the default None values)
             try:
@@ -123,11 +123,11 @@ class FileGroup(object):
 
         elif self.file_format == "plink_binary":
             self.fam_file = [ff for ff in infiles if re.search(".fam",
-                                                               ff)]
+                                                               ff)][0]
             self.bim_file = [fb for fb in infiles if re.search(".bim",
-                                                              fb)]
+                                                              fb)][0]
             self.bed_file = [bf for bf in infiles if re.search(".bed",
-                                                               bf)]
+                                                               bf)][0]
             # check files exist (i.e. are not the default None values)
             try:
                 assert self.fam_file
@@ -147,9 +147,9 @@ class FileGroup(object):
 
         elif self.file_format == "oxford":
             self.gen_file = [gf for gf in infiles if re.search(".gen",
-                                                               gf)]
+                                                               gf)][0]
             self.sample_file = [sf for sf in infiles if re.search(".sample",
-                                                                  sf)]
+                                                                  sf)][0]
             # check files exist (i.e. are not the default None values)
             try:
                 assert self.gen_file
@@ -164,9 +164,9 @@ class FileGroup(object):
 
         elif self.file_format == "oxford_binary":
             self.bgen_file = [bg for bg in infiles if re.search(".bgen",
-                                                                bg)]
+                                                                bg)][0]
             self.sample_file = [sf for sf in infiles if re.search(".sample",
-                                                                  sd)]
+                                                                  sf)][0]
             # check files exist (i.e. are not the default None values)
             try:
                 assert self.bgen_file
@@ -181,7 +181,7 @@ class FileGroup(object):
 
         elif self.file_format == "vcf":
             self.vcf_file = [vf for vf in infiles if re.search(".vcf",
-                                                               vf)]
+                                                               vf)][0]
             # check files exist (i.e. are not the default None values)
             try:
                 assert self.vcf_file
@@ -191,7 +191,7 @@ class FileGroup(object):
 
         elif self.file_format == "bcf":
             self.bcf_file = [bv for bv in infiles if re.search(".bcf",
-                                                               bv)]
+                                                               bv)][0]
             # check files exist (i.e. are not the default None values)
             try:
                 assert self.bcf_file
@@ -201,11 +201,11 @@ class FileGroup(object):
 
         elif self.file_format == "GRM_binary":
             self.id_file = [ig for ig in infiles if re.search(".grm.id",
-                                                              ig)]
+                                                              ig)][0]
             self.n_file = [gn for gn in infiles if re.search(".grm.N",
-                                                             gn)]
+                                                             gn)][0]
             self.bin_file = [gb for gb in infiles if re.search(".grm.bin",
-                                                               gb)]
+                                                               gb)][0]
             # check files exits
             try:
                 assert self.id_file
@@ -222,7 +222,26 @@ class FileGroup(object):
             except AssertionError:
                 raise ValueError("GRM binary file is missing, please "
                                  "specify")
-           
+
+    def set_phenotype(self, pheno_file=None, pheno=1):
+        '''
+        Set the phenotype for a set of individuals
+        using an external phenotypes file.
+
+        Default is to use the (n+2)th column, designated
+        as pheno 1.
+        '''
+
+        if type(pheno) == int:
+            pheno = str(pheno)
+        elif type(pheno) == str:
+            pass
+        else:
+            raise AttributeError("Type of pheno unknown. "
+                                 "Must be str or int.")
+        self.pheno_file = pheno_file
+        self.pheno = pheno
+
 
 class GWASProgram(object):
     '''
@@ -298,8 +317,14 @@ class GCTA(GWASProgram):
             statement.append(inputs)
         else:
             raise AttributeError("Files must be in binary plink format "
-                                 "to use GCTA.  Please convert and "
-                                 "try again.")
+                                 "or as a GRM to use GCTA.  Please "
+                                 "convert and try again.")
+
+        if infiles.pheno_file:
+            statement.append(" --pheno %s --mpheno %s " % (infiles.pheno_file,
+                                                           infiles.pheno))
+        else:
+            pass
 
         self.statement["program"] = " ".join(statement)
 
@@ -674,6 +699,16 @@ class Plink2(GWASProgram):
                                                      infiles.file_format)
             statement.append(inputs)
 
+        # check for the presence of an additional phenotypes file
+        try:
+            if infiles.pheno_file:
+                statement.append(" --pheno %s --mpheno %s " % (infiles.pheno_file,
+                                                               infiles.pheno))
+            else:
+                pass
+        except AttributeError:
+            pass
+
         self.statement["program"] = " ".join(statement)
 
     def hamming_matrix(self, shape, compression, options):
@@ -852,6 +887,8 @@ class Plink2(GWASProgram):
             self._construct_filters(ignore_indels=filter_value)
         elif filter_type == "snp_bp_range":
             self._construct_filters(snp_bp_range=filter_value)
+        elif filter_type == "conditional_snp":
+            self._construct_filters(conditional_snp=filter_value)
 
     def _build_multiple_file_input(self, infiles, file_format):
         '''
@@ -1003,15 +1040,16 @@ class Plink2(GWASProgram):
                       "autosome": " --autosome ",
                       "pseudo_autosome": " --autosome-xy ",
                       "ignore_indels": " --snps-only no-DI ",
-                      "snp_bp_range": " --from %s --to %s ",
+                      "snp_id_range": " --from %s --to %s ",
                       "specific_snp": " --snp %s ",
                       "window_size": " --window %s ",
                       "exclude_snp": " --exclude-snp %s ",
-                      "range_resolution": "--from-%s %s --to-%s %s ",
+                      "snp_bp_range": "--from-bp %s --to-bp %s ",
                       "covariates_file": " --filter %s ",
                       "covariate_filter": " %s ",
                       "covariate_column": " --mfilter %s ",
-                      "missing_phenotype": " --prune "}
+                      "missing_phenotype": " --prune ",
+                      "conditional_snp": " --condition %s "}
 
         # compile all filters together, checking for dependencies.
         # use a mapping dictionary to extract the relevant flags and
@@ -1076,12 +1114,30 @@ class Plink2(GWASProgram):
         except KeyError:
             pass
 
+        # range_resolution and snp_bp_range are used together
+        try:
+            assert filter_dict["snp_bp_range"]
+            flags = filter_map["snp_bp_range"]
+            from_pos = filter_dict["snp_bp_range"].split(",")[0]
+            to_pos = filter_dict["snp_bp_range"].split(",")[1]
+            filters.append(flags % (from_pos, to_pos))
+
+            # remove so they are not duplicated - source of bugs
+            filter_dict.pop("snp_bp_range", None)
+
+        except KeyError:
+            pass
+
         for each in filter_dict.keys():
             try:
                 assert filter_map[each]
                 # check for data type <- behaviour is type dependent
                 if type(filter_dict[each]) == 'bool':
                     filters.append(filter_map[each])
+                # handle multiple arguments in string format
+                elif len(filter_dict[each].split(",")) > 1:
+                    vals = tuple(filter_dict[each].split(","))
+                    filters.append(filter_map[each] % vals)
                 else:
                     filter_val = filter_dict[each]
                     filters.append(filter_map[each] % filter_val)
@@ -1101,6 +1157,11 @@ class Plink2(GWASProgram):
 
         These include file processing, reformating, filtering, data summaries,
         PCA, clustering, GRM calculation (slow and memory intense), etc.
+
+        multiple tasks can be added by separate calls to this function.
+        For instance, adding phenotype and gender information using the
+        update_samples task whilst change the file format.
+        
 
         Tasks
         -----
@@ -1179,11 +1240,16 @@ class Plink2(GWASProgram):
                     try:
                         assert sub_task[value]
                         try:
-                            # some tasks do not contain task values for the
-                            # parameter argument - catch these with the TypeError
-                            # exception
-                            statement.append(sub_task[value] % parameter)
-
+                            # gender has two string formats
+                            if value == "gender":
+                                gcol = 1
+                                statement.append(sub_task[value] % (parameter,
+                                                                    gcol))
+                            else:
+                                # some tasks do not contain task values for the
+                                # parameter argument - catch these with the TypeError
+                                # exception
+                                statement.append(sub_task[value] % parameter)
                             # the default for parameter is None, check this is appropriate
                             if not parameter:
                                 E.warn("Parameter value is set to NoneType. "
@@ -1194,15 +1260,20 @@ class Plink2(GWASProgram):
                         except TypeError:
                             statement.append(sub_task[value])
                     except KeyError:
-                        raise KeyError("% Task not recognised, see docs for details of "
-                                       "recognised tasks" % task)                    
+                        raise KeyError("No sub task found, see docs for details of "
+                                       "recognised tasks")                    
                 except KeyError:
                     raise KeyError("Task not recognised, see docs for details of "
                                    "recognised tasks")
             else:
                 pass
-
-        self.statement["tasks"] = " ".join(statement)
+        # handle multiple tasks for a single run
+        try:
+            curr_tasks = self.statement["tasks"]
+            new_tasks = " ".join(statement)
+            self.statement["tasks"] = " ".join([curr_tasks, new_tasks])
+        except KeyError:
+            self.statement["tasks"] = " ".join(statement)
 
 
     def _output_statistics(self, **kwargs):
@@ -1515,7 +1586,8 @@ class Plink2(GWASProgram):
 
         return " ".join(statement)
 
-    def build_statement(self, infiles, outfile, threads=None):
+    def build_statement(self, infiles, outfile, threads=None,
+                        memory="60G"):
         '''
         Build statement and execute from components
         '''
@@ -1557,6 +1629,12 @@ class Plink2(GWASProgram):
             statement.append(" --threads %i " % threads)
         else:
             pass
+
+        if memory != "60G":
+            memory = int(memory.strip("G")) * 1000
+            statement.append(" --memory %i " % memory)
+        else:
+            statement.append(" --memory 60000 ")
 
         # add output flag
         statement.append(" --out %s " % outfile)
