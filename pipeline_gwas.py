@@ -427,9 +427,11 @@ def runPCA(infiles, outfile):
     
 @follows(convertToPlink,
          mkdir("gwas.dir"))
-@collate("plink.dir/chr16impv1*",
-         regex("plink.dir/(.+).(...+)"),
-         r"gwas.dir/test_assoc-\1.assoc")
+@transform("plink.dir/chr16impv1*",
+           regex("plink.dir/(.+).bed"),
+           add_inputs([r"plink.dir/\1.fam",
+                       r"plink.dir/\1.bim"]),
+           r"gwas.dir/test_assoc-\1.assoc")
 def test_association(infiles, outfile):
     '''
     Run a test association on chromosome 16
@@ -438,7 +440,13 @@ def test_association(infiles, outfile):
     job_memory = "5G"
     job_threads = PARAMS['pca_threads']
 
-    infiles = ",".join(infiles)
+    bed_file = infiles[0]
+    fam_file = infiles[1][0]
+    bim_file = infiles[1][1]
+
+    plink_files = ",".join([bed_file, fam_file, bim_file])
+
+    out_pattern = ".".join(outfile.split(".")[:-1])
 
     statement = '''
     python /ifs/devel/projects/proj045/gwas_pipeline/geno2assoc.py
@@ -449,12 +457,12 @@ def test_association(infiles, outfile):
     --genotype-rate=0.01
     --indiv-missing=0.01
     --hardy-weinberg=0.0001
-    --min-allele-frequency=0.01
-    --output-file-pattern=gwas.dir/test_assoc
-    --threads=%(pca_threads)s
+    --min-allele-frequency=0.001
+    --output-file-pattern=%(out_pattern)s
+    --threads=%(candidate_threads)s
     --log=%(outfile)s.log
     -v 5
-    %(infiles)s
+    %(plink_files)s
     '''
 
     P.run()
