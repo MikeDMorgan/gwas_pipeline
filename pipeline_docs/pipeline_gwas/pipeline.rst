@@ -2,5 +2,6 @@
    :maxdepth: 2
 
    pipeline/Methods.rst
-   pipeline/Dummy.rst
+   pipeline/Phenotypes.rst
+   pipeline/Genotypes.rst
   

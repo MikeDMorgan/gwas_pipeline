@@ -156,21 +156,21 @@ def connect():
 @follows(mkdir("phenotypes.dir"))
 @transform("%s/*.tab" % PARAMS['data_dir'],
            regex("%s/(.+).tab" % PARAMS['data_dir']),
-           add_inputs(r"%s/\1.r" % PARAMS['data_dir']),
            r"phenotypes.dir/\1.tsv")
 def formatPhenotypeData(infiles, outfile):
     '''
     Use the UKBiobank encoding dictionary/R script to
-    set the factor levels for phenotype data
+    set the factor levels for phenotype data.
+    Output is in plink covariate file format
     '''
 
-    pheno_file = infiles[0]
-    r_file = infiles[1]
+    pheno_file = infiles
 
     statement = '''
     python /ifs/devel/projects/proj045/gwas_pipeline/pheno2pheno.py
-    --task=set_factors
-    --R-script=%(r_file)s
+    --task=plink_format
+    --id-variable=%(data_id_var)s
+    --log=%(outfile)s.log
     %(pheno_file)s
     > %(outfile)s
     '''
@@ -188,10 +188,103 @@ def loadPhenotypes(infile, outfile):
 
     P.load(infile, outfile)
 
+
+@follows(loadPhenotypes)
+@transform(formatPhenotypeData,
+           regex("phenotypes.dir/(.+).tsv"),
+           r"phenotypes.dir/\1_British.tsv")
+def selectBritish(infile, outfile):
+    '''
+    Select only those individuals with a white British
+    ethnicity
+    '''
+
+    statement = '''
+    python /ifs/devel/projects/proj045/gwas_pipeline/pheno2pheno.py
+    --task=select_ethnicity
+    --ethnicity-id=%(format_ethnicity_var)s
+    --ethnicity-label=%(format_ethnicity)s
+    --log=%(outfile)s.log
+    %(infile)s
+    > %(outfile)s
+    '''
+
+    P.run()
+
+
+@follows(loadPhenotypes,
+         selectBritish)
+@transform(selectBritish,
+           regex("phenotypes.dir/(.+)_British.tsv"),
+           r"phenotypes.dir/\1.pheno")
+def dichotimisePhenotype(infile, outfile):
+    '''
+    Dichotomise a phenotype for association testing
+    '''
+
+    statement = '''
+    python /ifs/devel/projects/proj045/gwas_pipeline/pheno2pheno.py
+    --task=dichotimise_phenotype
+    --pheno-id=%(data_dichot_var)s
+    --reference-variable=%(data_reference_value)s
+    --missing-var-label=%(data_missing_label)s
+    --log=%(outfile)s.log
+    %(infile)s
+    > %(outfile)s
+    '''
+
+    P.run()
+
+
+@follows(loadPhenotypes,
+         mkdir("plots.dir"))
+@transform(formatPhenotypeData,
+           regex("phenotypes.dir/(.+).tsv"),
+           r"plots.dir/1\_phenotype.png")
+def plotPhenotypeData(infile, outfile):
+    '''
+    Generare plots of phenotype distributions
+    for CGATReport document
+    '''
+
+    pass
+
+
+@follows(loadPhenotypes,
+         plotPhenotypeData)
+@transform(formatPhenotypeData,
+           regex("phenotypes.dir/(.+).tsv"),
+           r"plots.dir/\1_map_%s.png" % PARAMS['phenotype_map_overlay'])
+def plotPhenotypeMap(infile, outfile):
+    '''
+    Plot an overlay of a phenotype by geographical distribution
+    onto a map of the UK
+    '''
+
+    job_memory = "4G"
+
+    statement = '''
+    python /ifs/devel/projects/proj045/gwas_pipeline/pheno2plot.py
+    --plot-type=map
+    -x %(phenotype_map_overlay)s
+    --coordinate-file=%(phenotype_coord_file)s
+    --coords-id-col=%(phenotype_id_coords)s
+    --lattitude-column=%(phenotype_lat)s
+    --longitude-column=%(phenotype_long)s
+    --xvar-labels=%(phenotype_xlabels)s
+    --reference-value=%(phenotype_ref_value)s
+    --var-type=categorical
+    --log=%(outfile)s.log
+    --output-file=%(outfile)s
+    %(infile)s
+    '''
+
+    P.run()
+
 # ---------------------------------------------------
 # Specific pipeline tasks
 @follows(mkdir("plink.dir"),
-         loadPhenotypes)
+         dichotimisePhenotype)
 @collate("%s/*.bgen" % PARAMS['data_dir'],
          regex("%s/(.+)\.(.+)" % PARAMS['data_dir']),
          add_inputs("%s/*.sample" % PARAMS['data_dir']),
@@ -207,8 +300,8 @@ def convertToPlink(infiles, outfiles):
     job_memory = "10G"
     infiles = ",".join([x for x in infiles[0]])
 
-    log_out = outfiles.split(".")[0]
-    out_pattern=outfiles.split(".")[0]
+    log_out = ".".join(outfiles.split(".")[:-1])
+    out_pattern = ".".join(outfiles.split(".")[:-1])
 
     statement = '''
     python /ifs/devel/projects/proj045/gwas_pipeline/geno2assoc.py
@@ -352,6 +445,7 @@ if PARAMS['candidate_region']:
 else:
     pass
 
+@jobs_limit(3)
 @follows(convertToPlink,
          mkdir("grm.dir"))
 @transform("plink.dir/*.*",
@@ -374,7 +468,7 @@ def makeGRM(infiles, outfiles):
     bim_file = infiles[1][1]
 
     plink_files = ",".join([bed_file, fam_file, bim_file])
-    out_pattern = ".".join(outfiles.split(".")[:-4])
+    out_pattern = ".".join(outfiles.split(".")[:-5])
 
     statement = '''
     python /ifs/devel/projects/proj045/gwas_pipeline/geno2assoc.py
@@ -390,7 +484,7 @@ def makeGRM(infiles, outfiles):
 
     print out_pattern
 
-
+@jobs_limit(3)
 @follows(makeGRM,
          mkdir("pca.dir"))
 @transform("grm.dir/*.grm.bin",
@@ -427,14 +521,14 @@ def runPCA(infiles, outfile):
     
 @follows(convertToPlink,
          mkdir("gwas.dir"))
-@transform("plink.dir/chr16impv1*",
+@transform("plink.dir/chr*",
            regex("plink.dir/(.+).bed"),
            add_inputs([r"plink.dir/\1.fam",
                        r"plink.dir/\1.bim"]),
-           r"gwas.dir/test_assoc-\1.assoc")
-def test_association(infiles, outfile):
+           r"gwas.dir/\1_assoc.assoc")
+def unadjustedAssociation(infiles, outfile):
     '''
-    Run a test association on chromosome 16
+    Run an unadjusted association analysis on SNPs MAF >= 1%
     '''
 
     job_memory = "5G"
@@ -456,8 +550,8 @@ def test_association(infiles, outfile):
     --association-method=assoc
     --genotype-rate=0.01
     --indiv-missing=0.01
-    --hardy-weinberg=0.0001
-    --min-allele-frequency=0.001
+    --hardy-weinberg=0.00001
+    --min-allele-frequency=0.01
     --output-file-pattern=%(out_pattern)s
     --threads=%(candidate_threads)s
     --log=%(outfile)s.log
@@ -466,6 +560,29 @@ def test_association(infiles, outfile):
     '''
 
     P.run()
+
+@follows(mkdir("plots.dir"),
+         unadjustedAssociation)
+@transform(unadjustedAssociation,
+           regex("gwas.dir/(.+)_assoc.assoc"),
+           r"plots.dir/\1_manhattan.png")
+def plotChromosomeManhattan(infile, outfile):
+    '''
+    Generate a manhattan plot for each chromosome
+    from the unadjusted analysis
+    '''
+
+    statement = '''
+    python /ifs/devel/projects/proj045/gwas_pipeline/assoc2plot.py
+    --plot-type=manhattan
+    --resolution=chromosome
+    --save-path=%(outfile)s
+    --log=%(outfile)s.log
+    %(infile)s
+    '''
+
+    P.run()
+
 
 @follows(mkdir("dissect.dir"))
 @collate("%s/*" % PARAMS['data_dir'],

@@ -12,7 +12,17 @@ import pandas as pd
 import re
 import random
 import os
-
+import rpy2.robjects as ro
+from rpy2.robjects import r as R
+from rpy2.robjects import pandas2ri as py2ri
+from rpy2.robjects.packages import importr
+# set matplotlib non-interactive backend to Agg to
+# allow running on cluster
+import matplotlib
+#matplotlib.use("Qt4Agg")
+import matplotlib.pyplot as plt
+from ggplot import *
+import collections
 
 class FileGroup(object):
     '''
@@ -1640,3 +1650,462 @@ class Plink2(GWASProgram):
         statement.append(" --out %s " % outfile)
 
         os.system(" ".join(statement))
+
+
+class GWASResults(object):
+    '''
+    A class for handling the results from a GWA, used for plotting
+    and post-analysis QC
+    '''
+
+    def __init__(self, assoc_file):
+        self.infile = assoc_file
+        # results is a pandas dataframe to operate on
+        self.results = self.get_results(assoc_file)
+
+    def get_results(self, association_file):
+        '''
+        Parse a GWA results file and assign the table
+        as an attribute.
+        '''
+
+        # use Pandas for now - try something different later
+        # SQLite DB maybe?
+        # inconsistent number of white spaces between
+        # fields means Pandas parsing breaks down
+        # fields need to be the correct data type,
+        # i.e. BP = int, P = float, SNP = str, etc
+
+        l_count = 0
+        with open(association_file, "r") as ifile:
+            for line in ifile:
+                parsed = line.split(" ")
+                # remove multiple blank spaces
+                for i in range(parsed.count('')):
+                    parsed.remove('')
+                # get rid of the newline
+                parsed.remove("\n")
+                if l_count == 0:
+                    header = [iy for ix, iy in enumerate(parsed)]
+                    head_idx = [ix for ix, iy in enumerate(parsed)]
+                    map_dict = dict(zip(head_idx, header))
+                    res_dict = dict(zip(header, [[] for each in header]))
+                    l_count += 1
+                else:
+                    col_idx = [lx for lx, ly in enumerate(parsed)]
+                    col = [ly for lx, ly in enumerate(parsed)]
+                    for i in col_idx:
+                        res_dict[map_dict[i]].append(col[i])
+                    l_count += 1
+
+        # substract one from the index for the header column
+        df_idx = range(l_count-1)
+
+        results_frame = pd.DataFrame(res_dict, index=df_idx)
+        results_frame["BP"] = [int(bx) for bx in results_frame["BP"]]
+        results_frame["P"] = [np.float64(fx) for fx in results_frame["P"]]
+        try:
+            results_frame["STAT"] = [np.float64(sx) for sx in results_frame["STAT"]]
+        except KeyError:
+            results_frame["CHISQ"] = [np.float64(sx) for sx in results_frame["CHISQ"]]
+        try:
+            results_frame["F_U"] = [np.float64(ux) for ux in results_frame["F_U"]]
+        except KeyError:
+            pass
+
+        try:
+            results_frame["F_A"] = [np.float64(ax) for ax in results_frame["F_A"]]
+        except KeyError:
+            pass
+
+        try:
+            results_frame["OR"] = [np.float64(ox) for ox in results_frame["OR"]]
+        except KeyError:
+            pass
+
+        return results_frame
+
+    def plotManhattan(self, save_path, resolution="chromosome"):
+        '''
+        Generate a basic manhattan plot of the association results
+        Just deal with chromosome-by-chromosome for now.
+        '''
+
+        # use the python ggplot plotting package
+        # need to calculate -log10P values separately
+        self.results["log10P"] = np.log(self.results["P"])
+
+        # manplot = ggplot(self.results, aes(x="BP",
+        #                                    y="-log10P")) + \
+        #     geom_point() + xlab("Chromosome position (bp)") + \
+        #     ylab("-log10 P-value")
+
+        # or using rpy2
+        py2ri.activate()
+        R('''suppressPackageStartupMessages(library(ggplot2))''')
+        r_df = py2ri.py2ri_pandasdataframe(self.results)
+        R.assign("assoc.df", r_df)
+        R('''p <- ggplot(assoc.df, aes(x=BP, y=-log10P)) + geom_point() + '''
+          '''theme_bw() + labs(x="Chromosome position (bp)", '''
+          '''y="-log10 P-value")''')
+        R('''png("%s")''' % save_path)
+        R('''print(p)''')
+        R('''dev.off()''')
+
+    def plotQQ(self, save_path, resolution="chromosome"):
+        '''
+        Generate a QQ-plot of expected vs. observed
+        test statistics
+        '''
+
+        pass
+
+
+##########################################################
+# unbound methods that work on files and data structures #
+##########################################################
+
+def plotMapPhenotype(data, coords, coord_id_col, lat_col,
+                     long_col, save_path, xvar, var_type,
+                     xlabels=None, level=None):
+    '''
+    Generate a map of the UK, with phenotype data overlaid
+    '''
+    
+    # merge co-ordinate data with phenotype data
+    merged_df = pd.merge(left=coords, right=data, left_on="f.eid",
+                         right_on=coord_id_col, how='inner')
+
+    # pheno column and set level of categorical variable
+    if xlabels and var_type == "categorical":
+        # convert to string type as a categorical variable
+        # drop NA observations from the merged data frame
+        na_mask = pd.isnull(merged_df.loc[:, xvar])
+        merged_df = merged_df[~na_mask]
+
+        rvar = merged_df.loc[:, xvar].copy()
+        nvar = pd.Series(np.nan_to_num(rvar), dtype=str)
+        var = [v for v in set(nvar)]
+        var.sort()
+        # recode the variables according to the input labels
+        xlabs = xlabels.split(",")
+        print xlabs, var
+        lbls = [str(xlabs[ix]) for ix in range(len(var))]
+        for xv in range(len(var)):
+            nvar[nvar == var[xv]] = lbls[xv]
+        merged_df.loc[:, "cat_var"] = nvar
+
+    else:
+        pass
+
+    if level:
+        lvar = merged_df.loc[:, "cat_var"].copy()
+        mask = lvar.isin([level])
+        lvar[mask] = 1
+        lvar[~mask] = 0
+        lvar = lvar.fillna(0)
+        merged_df.loc[:, "dichot_var"] = lvar
+    else:
+        pass
+
+    # push the df into the R env
+    py2ri.activate()
+    r_df = py2ri.py2ri_pandasdataframe(merged_df)
+    R.assign("pheno.df", r_df)
+
+    # setup the map and plot the points
+    R('''suppressPackageStartupMessages(library(maps))''')
+    R('''suppressPackageStartupMessages(library(mapdata))''')
+
+    R('''uk_map <- map("worldHires", c("UK", "Isle of Wight",'''
+      '''"Ireland", "Isle of Man", "Wales:Anglesey"), '''
+      '''xlim=c(-11, 3), ylim=c(50, 60.9), plot=F)''')
+    # colour by reference, or a colour for each discrete value
+    if level:
+        R('''red <- rep("#FF0000", '''
+          '''times=length(pheno.df$dichot_var[pheno.df$dichot_var == 1]))''')
+        R('''black <- rep("#000000", '''
+          '''times=length(pheno.df$dichot_var[pheno.df$dichot_var == 0]))''')
+
+        R('''png("%(save_path)s", width=540, height=540, res=90)''' % locals())
+        R('''map(uk_map)''')
+
+        R('''points((pheno.df[,"%(long_col)s"])[pheno.df$dichot_var == 0], '''
+          '''(pheno.df[,"%(lat_col)s"])[pheno.df$dichot_var == 0], pch=".", col=black)''' % locals())
+
+        R('''points((pheno.df[,"%(long_col)s"])[pheno.df$dichot_var == 1], '''
+          '''(pheno.df[,"%(lat_col)s"])[pheno.df$dichot_var == 1], pch=".", col=red)''' % locals())
+
+        R('''legend('topleft', legend=c("not-%(level)s", "%(level)s"),'''
+          '''fill=c("#000000", "#FF0000"))''' % locals())
+        R('''dev.off()''')
+    else:
+        R('''print(pheno.df$cat_var[pheno.df$cat_var == "nan"])''')
+        R('''png("%(save_path)s", width=540, height=540, res=90)''' % locals())
+        R('''map(uk_map)''')
+
+        R('''points(pheno.df[,"%(long_col)s"], pheno.df[,"%(lat_col)s"], pch=".", '''
+          '''col=factor(pheno.df$cat_var))''' % locals())
+
+        R('''legend('topleft', legend=unique(pheno.df$cat_var),'''
+          '''fill=unique(pheno.df$cat_var))''' % locals())
+        R('''dev.off()''')
+        
+    
+def plotPhenotype(data, plot_type, x, y=None, group=None,
+                  save_path=None, labels=None, xlabels=None,
+                  ylabels=None, glabels=None, var_type="continuous"):
+    '''
+    Generate plots of phenotypes using ggplot
+    '''
+
+    # change data format if necessary and convert nan/NA to missing
+    if not y and var_type == "categorical":
+        var = np.nan_to_num(data.loc[:, x].copy())
+        data.loc[:, x] = pd.Series(var, dtype=str)
+        if group:
+            gvar = np.nan_to_num(data.loc[:, group].copy())
+            data.loc[:, group] = pd.Series(gvar, dtype=str)
+        else:
+            pass
+
+    elif not y and var_type == "integer":
+        var = np.nan_to_num(data.loc[:, x].copy())
+        data.loc[:, x] = pd.Series(var, dtype=np.int64)
+        if group:
+            gvar = np.nan_to_num(data.loc[:, group].copy())
+            data.loc[:, group] = pd.Series(gvar, dtype=str)
+        else:
+            pass
+
+
+    elif not y and var_type == "continuous":
+        var = data.loc[:, x].copy()
+        data.loc[:, x] = pd.Series(var, dtype=np.float64)
+        if group:
+            gvar = np.nan_to_num(data.loc[:, group].copy())
+            data.loc[:, group] = pd.Series(gvar, dtype=str)
+        else:
+            pass
+
+    elif y and var_type == "categorical":
+        xvar = np.nan_to_num(data.loc[:, x].copy())
+        yvar = np.nan_to_num(data.loc[:, y].copy())
+
+        data.loc[:, x] = pd.Series(xvar, dtype=str)
+        data.loc[:, y] = pd.Series(yvar, dtype=str)
+
+        if group:
+            gvar = np.nan_to_num(data.loc[:, group].copy())
+            data.loc[:, group] = pd.Series(gvar, dtype=str)
+        else:
+            pass
+
+
+    elif y and var_type == "integer":
+        xvar = np.nan_to_num(data.loc[:, x].copy())
+        yvar = np.nan_to_num(data.loc[:, y].copy())
+
+        data.loc[:, x] = pd.Series(xvar, dtype=np.int64)
+        data.loc[:, y] = pd.Series(yvar, dtype=np.int64)
+
+        if group:
+            gvar = np.nan_to_num(data.loc[:, group].copy())
+            data.loc[:, group] = pd.Series(gvar, dtype=str)
+        else:
+            pass
+
+
+    elif y and var_type == "continuous":
+        # NAs and NaNs should be handled by ggplot
+        xvar = data.loc[:, x].copy()
+        yvar = data.loc[:, y].copy()
+
+        data.loc[:, x] = pd.Series(xvar, dtype=np.float64)
+        data.loc[:, y] = pd.Series(yvar, dtype=np.float64)
+
+        if group:
+            gvar = np.nan_to_num(data.loc[:, group].copy())
+            data.loc[:, group] = pd.Series(gvar, dtype=str)
+        else:
+            pass
+
+
+    R('''suppressPackageStartupMessages(library(ggplot2))''')
+    # put the pandas dataframe in to R with rpy2
+    py2ri.activate()
+
+    r_df = py2ri.py2ri_pandasdataframe(data)
+    R.assign("data_f", r_df)
+
+    # plotting parameters, including grouping variables and labels
+    # axis labels
+    try:
+        labs = labels.split(",")
+    except AttributeError:
+        labs = []
+
+    # if variable labels have been provided then assume they are
+    # categorical/factor variables.
+    # assume variable labels are input in the correct order
+    if xlabels:
+        try:
+            unique_obs = len(set(data.loc[:, x]))
+            xfact = len(xlabels.split(","))
+            if xfact == unique_obs:
+                R('''lvls <- unique(data_f[,"%(x)s"])''' % locals())
+                lbls = ro.StrVector([ri for ri in xlabels.split(",")])
+                R.assign("lbls", lbls)
+                R('''lvls <- lvls[order(lvls, decreasing=F)]''')
+                R('''data_f[,"%(x)s"] <- ordered(data_f[,"%(x)s"], '''
+                  '''levels=lvls, labels=lbls)''' % locals())
+            else:
+                E.warn("the number of labels does not match the "
+                       "number of unique observations, labels not "
+                       "used.")
+                pass
+        except AttributeError:
+            xlabels = None
+            
+    else:
+        pass
+
+    if glabels:
+        unique_obs = len(set(data.loc[:, group]))
+        gfact = len(glabels.split(","))
+        if gfact == unique_obs:
+            R('''lvls <- unique(data_f[, "%(group)s"])''' % locals())
+            lbls = ro.StrVector([rg for rg in glabels.split(",")])
+            R.assign("lbls", lbls)
+            R('''lvls <- lvls[order(lvls, decreasing=F)]''')
+            R('''data_f[,"%(group)s"] <- ordered(data_f[,"%(group)s"], '''
+              '''levels=lvls, labels=lbls)''' % locals())
+        else:
+            E.warn("the number of labels does not match the "
+                   "number of unique observations, labels not "
+                   "used.")
+            pass
+
+    # start constructing the plot
+    # if X and Y are specified, assume Y is a variable to colour
+    # observations by, unless group is also set.
+    # If Y and group then colour by group and split by Y
+    if y:
+        R('''p <- ggplot(aes(x=%s, y=%s), data=data_f)''' % (x, y))
+
+        if plot_type == "histogram":
+            if group:
+                R('''p <- p + geom_histogram(aes(colour=%(group)s)) + '''
+                  '''facet_grid(. ~ %(y)s)''' % locals())
+            else:
+                R('''p <- p + geom_histogram(aes(colour=%(y)s))''' % locals())
+
+        elif plot_type == "barplot":
+            if group:
+                R('''p <- p + geom_bar(aes(colour=%(group)s)) + '''
+                  '''facet_grid(. ~ %(y)s)''' % locals())
+            else:
+                R('''p <- p + geom_bar(aes(colour=%(y)s))''' % locals())
+
+        elif plot_type == "density":
+            if group:
+                R('''p <- p + geom_density(aes(colour=%(group)s)) + '''
+                  '''facet_grid(. ~ %(y)s)''' % locals())
+            else:
+                R('''p <- p + geom_density(aes(colour=%(y)s))''' % locals())
+
+        elif plot_type == "boxplot":
+            if group:
+                R('''p <- p + geom_boxplot(group=%(group)s,'''
+                  '''aes(x=factor(%(x)s), y=%(y)s, fill=%(group)s))''' % locals())
+            else:
+                R('''p <- p + geom_boxplot(aes(colour=%(x)s))''' % locals())
+
+        elif plot_type == "scatter":
+            if group:
+                R('''p <- p + geom_point(size=1, aes(colour=%(group)s))''' % locals())
+            else:
+                R('''p <- p + geom_point(size=1)''')
+
+        if len(labs) == 1:
+            xlab = labs[0]
+            R('''p <- p + labs(x="%s")''' % xlab)
+        elif len(labs) == 2:
+            xlab = labs[0]
+            ylab = labs[1]
+            R('''p <- p + labs(x="%(xlab)s", y="%(ylab)s")''' % locals())
+        elif len(labs) == 3:
+            xlab = labs[0]
+            ylab = labs[1]
+            title = labs[2]
+            R('''p <- p + labs(x="%(xlab)s", y="%(ylab)s", '''
+              '''title="%(title)s")''' % locals())
+        elif len(labs) == 4:
+            xlab = labs[0]
+            ylab = labs[1]
+            glab = labs[2]
+            title = labs[3]
+            R('''p <- p + labs(x="%(xlab)s", y="%(ylab)s",'''
+              '''title="%(title)s")''' % locals())
+            # need to add in guide/legend title
+
+    else:
+        R('''p <- ggplot(data=data_f)''')  
+
+        if plot_type == "histogram":
+            if group:
+                R('''p <- p + geom_histogram(aes(%(x)s)) + '''
+                  '''facet_grid(. ~ %(group)s)''' % locals())
+            else:
+                R('''p <- p + geom_histogram(aes(%s))''' % x)
+
+        elif plot_type == "barplot":
+            if group:
+                R(''' p <- p + geom_bar(aes(%(x)s)) + '''
+                  '''facet_grid(. ~ %(group)s)''')
+            else:
+                R('''p <- p + geom_bar(aes(%s))''' % x)
+
+        elif plot_type == "density":
+            if group:
+                R('''p <- p + geom_density(aes(%(x)s)) + '''
+                  '''facet_grid(. ~ %(group)s)''' % locals())
+            else:
+                R('''p <- p + geom_density(aes(%s))''' % x)
+
+        elif plot_type == "boxplot":
+            if group:
+                R('''p <- p + geom_boxplot(aes(y=%(x)s, '''
+                  '''x=factor(%(group)s)))''' % locals())
+            else:
+                raise AttributeError("Y or group variable is missing")
+
+        if len(labs) == 1:
+            xlab = labs[0]
+            R('''p <- p + labs(x="%s")''' % xlab)
+        elif len(labs) == 2:
+            xlab = labs[0]
+            title = labs[1]
+            R('''p <- p + labs(x="%(xlab)s", '''
+              '''title="%(title)s")''' % locals())
+        elif len(labs) == 3:
+            if group:
+                xlab = labs[0]
+                glab = labs[1]
+                title = labs[2]
+                R('''p <- p + labs(x="%(glab)s", y="%(xlab)s",'''
+                  '''title="%(title)s")''' % locals())
+            else:
+                E.warn("too many labels provided, assume first is X, "
+                       "and second is plot title")
+                xlab = labs[0]
+                title = labs[1]
+                R('''p <- p + labs(x="%(xlab)s", '''
+                  '''title="%(title)s")''' % locals())
+            
+    # the default theme is bw
+    R('''p <- p + theme_bw()''')
+
+    R('''png("%(save_path)s")''' % locals())
+    R('''print(p)''')
+    R('''dev.off()''')
