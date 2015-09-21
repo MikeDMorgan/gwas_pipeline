@@ -106,7 +106,7 @@ def main(argv=None):
                       choices=["fhat", "cov", "ibc2", "ibc3", "ibs",
                                "genomic", "hamming"],
                       help="value to calculate for diagonal elements of the "
-                      "grm. Default is fhat for grm and hamming for distance.")
+                     "grm. Default is fhat for grm and hamming for distance.")
 
     parser.add_option("--matrix-options", dest="matrix_options", type="string",
                       help="modifiers of matrix output, see plink documentation "
@@ -361,7 +361,6 @@ def main(argv=None):
     for fkey in filter_dict:
         filt_key = fkey.lstrip("filt_")
         filter_value = filter_dict[fkey]
-        print filt_key
         gwas_object.filter_genotypes(filter_type=filt_key,
                                      filter_value=filter_value)
 
@@ -413,6 +412,7 @@ def main(argv=None):
         elif options.format_method == "update_variants":
             gwas_object._run_tasks(update_variants=options.variant_update,
                                    parameter=options.format_param)
+            gwas_object._run_tasks(change_format=options.file_format)
         elif options.format_method == "update_samples":
             gwas_object._run_tasks(update_samples=options.sample_update,
                                    parameter=options.format_param)

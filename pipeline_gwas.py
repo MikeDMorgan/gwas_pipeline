@@ -296,8 +296,7 @@ def convertToPlink(infiles, outfiles):
     per chromosome - keep the fam files the same
     '''
 
-    job_threads = int(PARAMS['data_threads'])
-    job_memory = "10G"
+    job_memory = "60G"
     infiles = ",".join([x for x in infiles[0]])
 
     log_out = ".".join(outfiles.split(".")[:-1])
@@ -316,11 +315,206 @@ def convertToPlink(infiles, outfiles):
     --reformat-type=plink_binary
     --output-file-pattern=%(out_pattern)s
     --log=%(log_out)s.log
-    --threads=%(job_threads)i
     %(infiles)s
     '''
 
     P.run()
+
+# -------------------------------------------------------------------
+# some variants have missing ID names - change these with the following
+# structure:
+# chr_bp_A1_A2
+@follows(convertToPlink)
+@transform(convertToPlink,
+           regex("plink.dir/(.+).bed"),
+           add_inputs([r"plink.dir/\1.fam",
+                       r"plink.dir/\1.bim"]),
+           r"plink.dir/\1.exclude")
+def nameVariants(infiles, outfile):
+    '''
+    Some variants have missing file names convert these to
+    have ID structure: chr_bp_A1_A2 instead - update the
+    relevant bim file and generate a list of variants
+    to exclude - triallelic, duplicates and overlapping
+    '''
+
+    bed_file = infiles[0]
+    fam_file = infiles[1][0]
+    bim_file = infiles[1][1]
+
+    # temporary file name
+    temp_file = P.getTempFilename(shared=True)
+
+    job_memory = "2G"
+
+    # use awk on the .bim file to generate replacement IDs
+
+    state0 = '''
+    cat %(bim_file)s | awk '{if($2 == ".") {printf("%%s\\t%%s_%%s_%%s_%%s\\t%%s\\t%%s\\t%%s\\t%%s\\n",
+    $1,$1,$4,$5,$6,$3,$4,$5,$6)} else{print $0}}' > %(temp_file)s.bim;
+    mv %(temp_file)s.bim %(bim_file)s
+    '''
+
+    # create files to remove triallelic variants, overlapping variants
+    # and duplicates
+    state1 = '''
+    python /ifs/devel/projects/proj045/gwas_pipeline/geno2geno.py
+    --task=detect_duplicates
+    --outfile-pattern=%(temp_file)s
+    %(bim_file)s;
+    cat %(temp_file)s.triallelic %(temp_file)s.duplicates
+    %(temp_file)s.overlapping >> %(outfile)s
+    '''
+
+    statement = ";".join([state0, state1])
+    P.run()
+
+
+# genotype filtering tasks:
+# snp genotyping rate
+# individual missingness
+# individual heterozygosity
+# individual relatedness - IBD
+# gender check - reported vs genetic gender
+# PCA on set of LD pruned SNPs - compare to self-reported ethnicity
+# perform each task independently and create exclusion lists. Remove
+# all individuals and SNPs at the end.
+
+# First step is to produce a complete LD pruned list of SNPs
+@follows(mkdir("QC.dir"),
+         nameVariants)
+@transform(convertToPlink,
+           regex("plink.dir/(.+).bed"),
+           add_inputs([r"plink.dir/\1.fam",
+                       r"plink.dir/\1.bim",
+                       r"plink.dir/\1.exclude"]),
+           r"QC.dir/\1.prune.in")
+def ldPruneSNPs(infiles, outfile):
+    '''
+    LD prune SNPs to create a list of independent SNPs
+    genome-wide.  To be used for PCA, GRM, inbreeding,
+    and heterozygosity estimation
+    '''
+
+    bed_file = infiles[0]
+    fam_file = infiles[1][0]
+    bim_file = infiles[1][1]
+    exclude_file = infiles[1][2]
+
+    plink_files = ",".join([bed_file, fam_file, bim_file])
+    out_pattern = ".".join(outfile.split(".")[:-2])
+    job_memory = "5G"
+    job_threads = 12
+
+    statement = '''
+    python /ifs/devel/projects/proj045/gwas_pipeline/geno2qc.py
+    --program=plink2
+    --input-file-format=plink_binary
+    --exclude-snps=%(exclude_file)s
+    --method=ld_prune
+    --use-kb
+    --prune-method=%(ld_prune_method)s
+    --step-size=%(ld_prune_step)s
+    --window-size=%(ld_prune_window)s
+    --threshold=%(ld_prune_threshold)s
+    --threads=%(job_threads)i
+    --output-file-pattern=%(out_pattern)s
+    --log=%(outfile)s.log
+    %(plink_files)s
+    '''
+
+    P.run()
+
+
+@follows(ldPruneSNPs,
+         mkdir("genome.dir"))
+@transform(convertToPlink,
+           regex("plink.dir/(.+).bed"),
+           add_inputs([r"plink.dir/\1.fam",
+                       r"plink.dir/\.bim",
+                       r"QC.dir/\1.prune.in"]),
+           r"genome.dir/\1_sparse.bed")
+def makeTrimmedData(infiles, outfile):
+    '''
+    Filter on the LD pruned set of SNPs to
+    create smaller, sparser genotype files
+    '''
+
+    bed_file = infiles[0]
+    fam_file = infiles[1][0]
+    bim_file = infiles[1][1]
+    snps_file = infiles[1][2]
+
+    plink_files = ",".join([bed_file, fam_file, bim_file])
+    job_memory = "4G"
+    job_threads = 12
+
+    statement = '''
+    python /ifs/devel/projects/proj045/gwas_pipeline/geno2assoc.py
+    --program=plink2
+    --input-file-format=plink_binary
+    --method=format
+    --format-method=change_format
+    --reformat-type=plink_binary
+    --extract-snps=%(snps_file)s
+    --log=%(outfile)s.log
+    --output-file-pattern=%(outpattern)s
+    --threads=%(job_threads)i
+    %(plink_files)s
+    '''
+
+    P.run()
+
+@follows(makeTrimmedData)
+@collate(makeTrimmedData,
+         regex("genome.dir/(.+)_sparse.bed"),
+         add_inputs([r"genome.dir/\1_sparse.fam",
+                     r"genome.dir/\1_sparse.bim"]),
+         r"genome.dir/WholeGenome.bed")
+def mergePlinkFiles(infiles, outfile):
+    '''
+    Merge all of the LD pruned files together
+    to form a set of LD-independent genome-wide
+    genotyping files for downstream sample QC
+    '''
+
+    # generate text file that contains the names of the files
+    # to be merged
+    temp_file = P.getTempFile(shared=True)
+    
+    outpattern = ".".join(outfile.split(".")[:-1])
+    job_memory = "64G"
+    job_threads = 1
+    with open(temp_file, "r") as ofile:
+        for ifile in infiles:
+            ifile_bed = ifile[0]
+            ifile_fam = ifile[1][0]
+            ifile_bim = ifile[1][1]
+            ofile.write("%s\t%s\t%s\n" % (ifile_bed, ifile_bim, ifile_fam))
+
+    statement = '''
+    plink2
+    --merge-list %(temp_file)s
+    --threads=%(job_threads)i
+    --out %(outpattern)s;
+    rm -rf %(temp_file)s
+    '''
+
+    P.run()
+
+
+@follows(mergePlinkFiles)
+@transform(mergePlinkFiles,
+           regex())
+def excessHeterozygosity(infiles, outfile):
+    '''
+    Detect individuals with excess of heterozygosity - indicative
+    of population outbreeding/admixture and/or genotyping
+    errors
+    '''
+
+    pass
+
 
 if PARAMS['candidate_region']:
     @follows(convertToPlink,

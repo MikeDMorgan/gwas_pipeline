@@ -105,11 +105,12 @@ def main(argv=None):
     elif options.task == "dichotimise_phenotype":
         df = pd.read_table(infile, sep="\t", header=0, index_col=None)
         var = pd.Series(df[options.dichot_var].copy(), dtype=np.int64)
-        mask = var.isin([options.ref_level])
+        ref = np.int64(options.ref_level)
+        mask = var.isin([ref])
         # set NA or unobserved to missing, assume missing value is -9 (Plink standard)
         nas = np.isnan(var)
-        var[mask] = 1
-        var[~mask] = 0
+        var[~mask] = 1
+        var[mask] = 2
         var[nas] = -9
         # there maybe multiple missing/unobserved data categories to deal with
         missing = options.missing_label.split(",")

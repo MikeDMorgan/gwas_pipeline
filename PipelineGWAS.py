@@ -871,6 +871,7 @@ class Plink2(GWASProgram):
           analysis. [tuple]
 
         '''
+
         if filter_type == "genotype_rate":
             self._construct_filters(genotype_rate=filter_value)
         elif filter_type == "hwe":
@@ -885,6 +886,8 @@ class Plink2(GWASProgram):
             self._construct_filters(exclude_snp=filter_value)
         elif filter_type == "exclude_snps":
             self._construct_filters(exclude=filter_value)
+        elif filter_type == "extract":
+            self._construct_filters(extract=filter_value)
         elif filter_type == "chromosome":
             self._construct_filters(chromosome=filter_value)
         elif filter_type  == "exclude_chromosome":
@@ -1596,6 +1599,127 @@ class Plink2(GWASProgram):
 
         return " ".join(statement)
 
+    def _qc_methods(self, parameter=None, **kwargs):
+        ''''
+        Perform QC on genotyping data, SNP-wise and sample-wise.
+        All arguments are passed as key word arguments, except
+        cases detailed in `Parameters` where they are passed with
+        the ``parameter`` argument.
+        
+        Methods
+        -------
+        * ld_prune - generate a list of SNPs in linkage equilibrium by
+          pruning SNPs on either an LD statistic threshold, i.e. r^2,
+          or use a variance inflation factor (VIF) threshold
+        * heterozygosity - calculate average heterozygosity from each
+          individual across a set of SNPs, threshold on individuals
+          with deviation from expected proportions
+        * ibd - calculate the genetic relationship of individuals to
+          infer relatedness between individuals, threshold on given
+          degree of relatedness, e.g. IBD > 0.0625, 3rd cousins
+        * genetic_gender - estimate the gender of an individual
+          from the X chromosome genotypes - correlate with reported
+          gender and output discrepancies
+        * ethnicity_pca - perform PCA using a subset of independent
+          SNPs to infer genetic ancestry.  Compare and contrast this
+          to individuals reported ancestry.  Report discrepancies
+          and individuals  greater than a threshold distance away
+          from a reference population.
+        * homozygosity - identifies sets of runs of homozygosity
+          within individuals.  These may be indicative of inbreeding,
+          systematic genotyping errors or regions under selection.
+
+        Parameters
+        ----------
+        Method parameters can also be passed through this function
+        as keyword=value pairs.
+        * ld_prune:
+          `kb` - this modifier changes the window resolution to kb
+          rather than bp.
+          `r2` - the r^2 threshold above which SNPs are to be removed
+          `vif` - the VIF threshold over which SNPs will be removed
+          `window` - window size to calculate pair-wise LD over
+          `step` - step size to advance window by
+        '''
+
+        qc_dict = {"ld_prune": {"R2": " --indep-pairwise %s %s %s ",
+                                "VIF": " --indep %s %s %s "},
+                   "heterozygosity": {"gz": " --het gz",
+                                      "raw": " --het "},
+                   "ibd": {"relatives": " --genome gz rel-check ",
+                           "full": " --genome gz full ",
+                           "norm": " --genome gz "},
+                   "genetic_gender": "none",
+                   "ethnicity_pca": "none",
+                   "homozygosity": {"min_snp": " --homozyg-snp %s ",
+                                    "min_kb": " --homozyg-kb %s ",
+                                    "default": " --homozyg ",
+                                    "density": " --homozyg-density ",
+                                    "set_gap": " --homozyg-gap ",
+                                    "snp_window": " --homozyg-window-snp %s ",
+                                    "het_max": " --homozyg-het %s "}}
+
+        task_dict = {}
+        state = []
+
+        # put everything in an accessible dictionary first
+        for task, value in kwargs.iteritems():
+            task_dict[task] = value
+
+        # LD pruning can be passed multiple parameters,
+        # handle this separately
+        try:
+            sub_task = task_dict["ld_prune"]
+            ld_prune_task = qc_dict["ld_prune"]
+
+            try:
+                step = task_dict["step"]
+            except KeyError:
+                raise AttributeError("No step size found, please "
+                                     "pass a step size to advance the "
+                                     "window by")
+            try:
+                window = task_dict["window"]
+                try:
+                    task_dict["kb"]
+                    window = "".join([window, "kb"])
+                    task_dict.pop("kb", None)
+                except KeyError:
+                    pass
+
+            except KeyError:                        
+                raise AttributeError("No window size found.  Please input "
+                                     "a window size to prune over")
+            try:
+                threshold = task_dict["threshold"]
+            except KeyError:
+                raise AttributeError("No threshold value, please input "
+                                     "a value to LD prune SNPs on")
+
+            # add in the kb if it is passed as an argument
+            state.append(ld_prune_task[sub_task] % (window, step, threshold))
+
+            task_dict.pop("threshold", None)
+            task_dict.pop("ld_prune", None)
+            task_dict.pop("window", None)
+            task_dict.pop("step", None)
+
+        except KeyError:
+            pass
+
+        for task,value in task_dict.iteritems():
+            try:
+                sub_task = qc_dict[task]
+                try:
+                    state.append(sub_task[value] % parameter)
+                except ValueError:
+                    state.append(sub_task[value])
+            except KeyError:
+                raise AttributeError("Task not found, please see "
+                                     "documentation for available features")
+
+        self.statement["QC"] = " ".join(state)
+
     def build_statement(self, infiles, outfile, threads=None,
                         memory="60G"):
         '''
@@ -1610,6 +1734,11 @@ class Plink2(GWASProgram):
         except KeyError:
             raise AttributeError("Input files and format not detected")
             
+        try:
+            statement.append(self.statement["QC"])
+        except KeyError:
+            pass
+
         try:
             statement.append(self.statement["filters"])
         except KeyError:
@@ -1647,7 +1776,14 @@ class Plink2(GWASProgram):
             statement.append(" --memory 60000 ")
 
         # add output flag
-        statement.append(" --out %s " % outfile)
+        # outfile needs to be complete path for Plink to save
+        # results properly - check if it starts with '/',
+        # if so is already a full path
+        if os.path.isabs(outfile):
+            statement.append(" --out %s " % outfile)
+        else:
+            outpath = "/".join([os.getcwd(), outfile])
+            statement.append(" --out %s " % outpath)
 
         os.system(" ".join(statement))
 
@@ -2109,3 +2245,376 @@ def plotPhenotype(data, plot_type, x, y=None, group=None,
     R('''png("%(save_path)s")''' % locals())
     R('''print(p)''')
     R('''dev.off()''')
+
+
+def countByVariantAllele(ped_file, map_file):
+    '''
+    Count the number of individuals carrying the variant allele
+    for each SNP.
+    Count the number of occurences of each allele with the variant
+    allele of each other SNP.
+
+    Requires ped file genotyping to be in format A1(minor)=1, A2=2
+    '''
+
+    # parse the ped file - get the variant column headers from
+    # the map file - no headers with these files
+    # variant order in the map file matters, use an ordered dict
+    variants = collections.OrderedDict()
+    with open(map_file, "r") as mfile:
+        for snp in mfile.readlines():
+            attrs = snp.split("\t")
+            snpid = attrs[1]
+            variants[snpid] = {"chr": attrs[0],
+                               "pos": attrs[-1].strip("\n")}
+
+    variant_ids = variants.keys()
+    # store genotype matrix as an array
+    # rows and columns are variant IDs
+    homA1 = np.zeros((len(variant_ids), len(variant_ids)),
+                     dtype=np.int64)
+
+    homA2 = np.zeros((len(variant_ids), len(variant_ids)),
+                     dtype=np.int64)
+
+    het  = np.zeros((len(variant_ids), len(variant_ids)),
+                     dtype=np.int64)
+
+    tcount = 0
+    with open(ped_file, "r") as pfile:
+        for indiv in pfile.readlines():
+            indiv = indiv.strip("\n")
+            indiv_split = indiv.split(" ")
+            fid = indiv_split[0]
+            iid = indiv_split[1]
+            mid = indiv_split[2]
+            pid = indiv_split[3]
+            gender = indiv_split[4]
+            phen = indiv_split[5]
+            alleles = indiv_split[6:]
+            genos = ["".join([alleles[i],
+                              alleles[i+1]]) for i in range(0, len(alleles), 2)]
+            tcount += 1
+            # get genotype counts
+            for i in range(len(genos)):
+                # missing genotypes are coded '00' in plink format
+                if genos[i] == "00":
+                    pass
+                elif genos[i] == "11":
+                    homA1[i, i] += 1
+                elif genos[i] == "12":
+                    het[i, i] += 1
+                else:
+                    homA2[i, i] += 1
+    allele_counts = ((2 * homA2) + het)/float(2 * tcount)
+    mafs = 1 - allele_counts.diagonal()
+
+    return zip(variant_ids, mafs)
+
+
+def calcPenetrance(ped_file, map_file, mafs=None,
+                   subset=None):
+    '''
+    Calculate the proportion of times an allele is observed
+    in the phenotype subset vs it's allele frequency.
+    This is the penetrance of the allele
+    i.e. if observed in 100% of affected individuals and 0%
+    of controls, then penetrance is 100%
+    Generates a table of penetrances for each variants/allele
+    and a plot of MAF vs # cases carrying the allele
+
+    Generates a heatmap of compound heterozygotes, and homozygotes
+    with penetrances.
+
+    Outputs a table of SNPs, homozygote and heterozygote counts
+    among subset individuals and proportion of subset individual
+    phenotype explained by homozygotes and heterozygotes
+
+    Requires alleles are coded A1(minor)=1, A2=2
+    '''
+    # check subset is set, if not then throw an error
+    # cannot calculate penetrance without a phenotype
+    if not subset:
+        raise ValueError("Cannot calculate penetrance of alleles "
+                         "without a phenotype to subset in")
+    else:
+        pass
+
+    # parse the ped file - get the variant column headers from
+    # the map file - no headers with these files
+    # variant order in the map file matters, use an ordered dict
+    variants = collections.OrderedDict()
+    with open(map_file, "r") as mfile:
+        for snp in mfile.readlines():
+            attrs = snp.split("\t")
+            snpid = attrs[1]
+            variants[snpid] = {"chr": attrs[0],
+                               "pos": attrs[-1].strip("\n")}
+
+    variant_ids = variants.keys()
+
+    case_mat = np.zeros((len(variant_ids), len(variant_ids)),
+                        dtype=np.float64)
+
+    all_mat = np.zeros((len(variant_ids), len(variant_ids)),
+                       dtype=np.float64)
+
+    tcount = 0
+    ncases = 0
+    # missing phenotype individuals must be ignored, else
+    # they will cause the number of individuals explained
+    # to be underestimated
+    with open(ped_file, "r") as pfile:
+        for indiv in pfile.readlines():
+            indiv = indiv.strip("\n")
+            indiv_split = indiv.split(" ")
+            fid = indiv_split[0]
+            iid = indiv_split[1]
+            mid = indiv_split[2]
+            pid = indiv_split[3]
+            gender = indiv_split[4]
+            phen = int(indiv_split[5])
+            if phen != -9:
+                if subset == "cases":
+                    select = phen
+                elif subset == "gender":
+                    select = gender
+                else:
+                    select = None
+                alleles = indiv_split[6:]
+                genos = ["".join([alleles[i],
+                                  alleles[i+1]]) for i in range(0, len(alleles), 2)]
+                tcount += 1
+
+                A1 = np.zeros(len(genos), dtype=np.int64)
+
+                for i in range(len(genos)):
+                    # missing values are coded '00' in plink format
+                    # A2 homs are coded '00' in plink format
+                    if genos[i] == "00":
+                        A1[i] = 0
+                    elif genos[i] == "11":
+                        A1[i] += 2
+                    elif genos[i] == "12":
+                        A1[i] += 1
+                    else:
+                        pass
+
+                gen_mat = np.outer(A1, A1)
+                # diagonals will contain 4's, need these
+                # to be 1's or 2's
+                gen_mat = gen_mat/2
+                
+                # separate matrix for subset
+                # reference is always level 2 for plink files,
+                # either cases or females
+                if select == 2:
+                    case_mat += gen_mat
+                    all_mat += gen_mat
+                    ncases += 1
+                else:
+                    all_mat += gen_mat
+            else:
+                pass
+
+    penetrance = np.divide(case_mat, all_mat)
+    # round for the sake of aesthetics
+    penetrance = np.round(penetrance, decimals=3)
+    pen_df = pd.DataFrame(penetrance, columns=variant_ids,
+                          index=variant_ids)
+    pen_df = pen_df.fillna(0.0)
+    # plot heatmap of penetrances as percentages
+    indf = pen_df * 100
+    py2ri.activate()
+
+    # only plot penetrances > 0%
+    r_pen = py2ri.py2ri_pandasdataframe(indf)
+    R.assign("pen.df", r_pen)
+    R('''suppressPackageStartupMessages(library(gplots))''')
+    R('''suppressPackageStartupMessages(library(RColorBrewer))''')
+
+    R('''hmcol <- colorRampPalette(brewer.pal(9, "BuGn"))(100)''')
+    R('''rowpen <- pen.df[rowSums(pen.df) > 0,]''')
+    R('''colpen <- rowpen[,colSums(rowpen) > 0]''')
+    R('''png("%s/penetrance-matrix.png", width=540, height=540)''' % os.getcwd())
+    R('''heatmap.2(as.matrix(colpen), trace="none", col=hmcol,'''
+      '''dendrogram="none", Colv=colnames(colpen), key=FALSE, '''
+      '''Rowv=rownames(colpen), margins=c(10,10), cellnote=round(colpen),'''
+      '''notecol="white")''')
+    R('''dev.off()''')
+
+    # plot MAF vs homozygosity
+    maf_df = pd.read_table(mafs, sep="\t", header=0, index_col=0)
+    plot_df = pd.DataFrame(columns=["MAF"],
+                           index=maf_df.index)
+    plot_df["MAF"] = maf_df["MAF"]
+
+    homs = case_mat.diagonal()
+    hom_series = pd.Series({x: y for x, y in zip(variant_ids,
+                                                 homs)})
+    plot_df["explained_by_homozygotes"] = hom_series
+    plot_df["SNP"] = plot_df.index
+    plot_df.index = [ix for ix, iy in enumerate(plot_df.index)]
+    plotPenetrances(plotting_df=plot_df)
+
+    out_df = summaryPenetrance(maf_df=maf_df,
+                               case_counts=case_mat,
+                               variants=variant_ids,
+                               n_cases=ncases)
+    return out_df, pen_df
+
+
+def summaryPenetrance(maf_df, case_counts,
+                      variants, n_cases):
+    '''
+    Summarise genotype counts and proportion of cases explained
+    by the observed homozygotes and compound heterozygotes.
+    This is a function of the total population size and
+    population allele frequency - does this assume 100%
+    penetrance of each allele?
+    '''
+
+    # homozygous individuals  are on the
+    # diagonal of the case_counts array
+    homozyg_cases = case_counts.diagonal()
+    homozyg_series = pd.Series({x: y for x, y in zip(variants,
+                                                     homozyg_cases)})/2
+
+    # heterozygotes are on the off-diagonal elements
+    # get all off diagonal elements by setting diagonals to zero
+    # matrix is diagonal symmetric
+    np.fill_diagonal(case_counts, 0)
+    
+    het_counts = np.sum(case_counts, axis=0)
+    het_series = pd.Series({x: y for x, y in zip(variants,
+                                                  het_counts)})                                                  
+    out_df = pd.DataFrame(columns=["homozygote_cases", 
+                                   "heterozygote_cases"],
+                          index=maf_df.index)
+    out_df["MAF"] = maf_df["MAF"]
+    out_df["homozygote_cases"] = np.round(homozyg_series, 1)
+    out_df["heterozygote_cases"] = het_series
+    out_df["hom_prop_explained"] = np.round(homozyg_series/float(n_cases), 3)
+    out_df["het_prop_explained"] = np.round(het_series/float(n_cases), 3)
+
+    return out_df
+
+
+def plotPenetrances(plotting_df):
+    '''
+    Plot the proportion of cases/phenotype explained by 
+    individuals carrying allele vs. population allele frequency.
+   
+    Generate final output summary table (should be in separate function)
+    '''
+
+    # only need to plot variants with MAF >= 0.01
+    low_frq = plotting_df["MAF"] < 0.01
+    hi_df = plotting_df[~low_frq]
+    
+    # get into R and use ggplot for MAF vs homozygosity amongs cases
+    r_plot = py2ri.py2ri_pandasdataframe(hi_df)
+    R.assign("hom.df", r_plot)
+
+    R('''suppressPackageStartupMessages(library(ggplot2))''')
+    R('''png("%s/penetrance-plot.png", height=540, width=540)''' % os.getcwd())
+    R('''pen_p <- ggplot(hom.df, aes(x=explained_by_homozygotes, y=MAF, colour=SNP)) + '''
+      '''geom_point(size=4) + theme_bw() + '''
+      '''geom_text(aes(label=explained_by_homozygotes),'''
+      '''colour="black",vjust=0.5, hjust=0.5) + '''
+      '''labs(x="Number of Red haired homozygotes", y="MAF")''')
+    R('''print(pen_p)''')
+    R('''dev.off()''')
+
+
+def findDuplicateVariants(bim_file, take_last=False):
+    '''
+    identify variants with duplicate position and reference
+    alleles
+    '''
+
+    # count the number of lines first to get
+    # the necessary array sizes
+    E.info("getting number of variants")
+    lines = 1
+    with open(bim_file, "r") as bfile:
+        for line in bfile.readlines():
+            lines += 1
+
+    E.info("%i variants found" % lines)
+    
+    # setup index arrays
+    var_array = np.empty(lines, dtype=object)
+    ref_alleles = np.empty(lines, dtype=object)
+    pos_array = np.zeros(lines, dtype=np.int64)
+    minor_alleles = np.empty(lines, dtype=object)
+    idx = 0
+
+    # find duplicates on position
+    with open(bim_file, "r") as bfile:
+        for line in bfile.readlines():
+            line = line.rstrip("\n")
+            varline = line.split("\t")
+            var = varline[1]
+            pos = int(varline[3])
+            ref_allele = varline[-1]
+            minor_allele = varline[-2]
+            var_array[idx] = var
+            ref_alleles[idx] = ref_allele
+            minor_alleles[idx] = minor_allele
+            pos_array[idx] = pos
+            
+            idx += 1
+   
+    # find duplicates using pandas series
+    pos_series = pd.Series(pos_array)
+    dup_last = pos_series[pos_series.duplicated(take_last=True)]
+    dup_first = pos_series[pos_series.duplicated(take_last=False)]
+    var_series = pd.Series(var_array)
+    ref_series = pd.Series(ref_alleles)
+    alt_series = pd.Series(minor_alleles)
+
+    # union of take first and take last
+    dup_all = set(dup_last.index).union(set(dup_first.index))
+    dup_idx = np.array([sx for sx in dup_all])
+    dup_idx.sort()
+
+    # make a dataframe to hold all triallelic and duplicate variants
+    dup_dict = {"SNP": var_series[dup_idx],
+                "BP": pos_series[dup_idx],
+                "REF": ref_series[dup_idx],
+                "VAR": alt_series[dup_idx]}
+    dup_df = pd.DataFrame(dup_dict)
+
+    # some variants may have more than one ID/entry
+    # step through using pandas groupby - group on position
+    E.info("looking for duplicates and triallelic variants")
+    tri_alleles = []
+    dups_alleles = []
+    overlap_vars = []
+    for names, groups in dup_df.groupby(["BP"]):
+        # if there is only one reference allele, indicates a
+        # triallelic variant, otherwise its probably a duplicate
+        # or overlaping INDEL and SNV
+        var_lens = groups["VAR"].apply(len)
+        if np.mean(var_lens) > 1:
+            # probably overlapping variants, exclude, but report
+            # separately
+            over_vars = groups["SNP"].values.tolist()
+            for ovs in over_vars:
+                overlap_vars.append(ovs)
+
+        elif len(set(groups["REF"])) == 1:
+            tri_vars = groups["SNP"].values.tolist()
+            for tri in tri_vars:
+                tri_alleles.append(tri)
+        else:
+            dup_vars = groups["SNP"].values.tolist()
+            for dup in dup_vars:
+                dups_alleles.append(dup)
+
+    E.info("%i triallelic variants found" % len(tri_alleles))
+    E.info("%i duplicate position variants found" % len(dups_alleles))
+    E.info("%i overlapping SNVs and INDELs found" % len(overlap_vars))
+    
+    return dups_alleles, tri_alleles, overlap_vars
