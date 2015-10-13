@@ -39,6 +39,7 @@ from rpy2.robjects import pandas2ri
 import pandas as pd
 import re
 import numpy as np
+import PipelineGWAS as gwas
 
 
 def main(argv=None):
@@ -155,6 +156,13 @@ def main(argv=None):
         filter_df.drop(labels="FID", axis=1, inplace=True)
         filter_df.to_csv(options.stdout, sep="\t", index_col=None)
         
+    elif options.task == "flag_hets":
+        # calculate heterozygosity rates, find and flag
+        # individuals > 1 s.d. away from mean value
+        # rate = (nonissing - homs) / nonmissing
+        # i.e. non-homozygote rate
+        flags = gwas.flagExcessHets(infile)
+        flags.to_csv(options.stdout, index=None, sep="\t")
     else:
         pass
         

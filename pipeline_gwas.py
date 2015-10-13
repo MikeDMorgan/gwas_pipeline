@@ -363,7 +363,7 @@ def nameVariants(infiles, outfile):
     --outfile-pattern=%(temp_file)s
     %(bim_file)s;
     cat %(temp_file)s.triallelic %(temp_file)s.duplicates
-    %(temp_file)s.overlapping >> %(outfile)s
+    %(temp_file)s.overlapping | sort | uniq >> %(outfile)s
     '''
 
     statement = ";".join([state0, state1])
@@ -380,7 +380,10 @@ def nameVariants(infiles, outfile):
 # perform each task independently and create exclusion lists. Remove
 # all individuals and SNPs at the end.
 
+# GRM will give relatedness and inbreeding at the same time
+
 # First step is to produce a complete LD pruned list of SNPs
+# this is slow for lots of SNPs and samples!
 @follows(mkdir("QC.dir"),
          nameVariants)
 @transform(convertToPlink,
@@ -431,13 +434,14 @@ def ldPruneSNPs(infiles, outfile):
 @transform(convertToPlink,
            regex("plink.dir/(.+).bed"),
            add_inputs([r"plink.dir/\1.fam",
-                       r"plink.dir/\.bim",
+                       r"plink.dir/\1.bim",
                        r"QC.dir/\1.prune.in"]),
            r"genome.dir/\1_sparse.bed")
 def makeTrimmedData(infiles, outfile):
     '''
     Filter on the LD pruned set of SNPs to
     create smaller, sparser genotype files
+    Remove duplicates first
     '''
 
     bed_file = infiles[0]
@@ -446,10 +450,24 @@ def makeTrimmedData(infiles, outfile):
     snps_file = infiles[1][2]
 
     plink_files = ",".join([bed_file, fam_file, bim_file])
+    outpattern = ".".join(outfile.split(".")[:-1])
     job_memory = "4G"
     job_threads = 12
 
-    statement = '''
+    tmpfile = P.getTempFilename(shared=True)
+
+    job_memory = "32G"
+
+    # find duplicates
+    state1 = '''
+    python /ifs/devel/projects/proj045/gwas_pipeline/geno2geno.py
+    --task=detect_duplicates
+    --outfile-pattern=%(tmpfile)s
+    %(bim_file)s
+    '''
+    exclude_file = tmpfile + ".exclude"
+
+    state2 = '''
     python /ifs/devel/projects/proj045/gwas_pipeline/geno2assoc.py
     --program=plink2
     --input-file-format=plink_binary
@@ -457,11 +475,14 @@ def makeTrimmedData(infiles, outfile):
     --format-method=change_format
     --reformat-type=plink_binary
     --extract-snps=%(snps_file)s
+    --exclude-snps=%(exclude_file)s
     --log=%(outfile)s.log
     --output-file-pattern=%(outpattern)s
     --threads=%(job_threads)i
     %(plink_files)s
     '''
+
+    statement = ";".join([state1, state2])
 
     P.run()
 
@@ -480,12 +501,15 @@ def mergePlinkFiles(infiles, outfile):
 
     # generate text file that contains the names of the files
     # to be merged
-    temp_file = P.getTempFile(shared=True)
+    temp_file = P.getTempFilename(shared=True)
+
+    # not all multi-allelic SNPs have been removed properly
+    # include the *.missnp file as an exclusion
     
     outpattern = ".".join(outfile.split(".")[:-1])
     job_memory = "64G"
     job_threads = 1
-    with open(temp_file, "r") as ofile:
+    with open(temp_file, "w") as ofile:
         for ifile in infiles:
             ifile_bed = ifile[0]
             ifile_fam = ifile[1][0]
@@ -495,7 +519,7 @@ def mergePlinkFiles(infiles, outfile):
     statement = '''
     plink2
     --merge-list %(temp_file)s
-    --threads=%(job_threads)i
+    --threads %(job_threads)i
     --out %(outpattern)s;
     rm -rf %(temp_file)s
     '''
@@ -505,16 +529,138 @@ def mergePlinkFiles(infiles, outfile):
 
 @follows(mergePlinkFiles)
 @transform(mergePlinkFiles,
-           regex())
-def excessHeterozygosity(infiles, outfile):
+           regex("genome.dir/(.+).bed"),
+           add_inputs([r"genome.dir/\1.fam",
+                       r"genome.dir/\2.bim"]),
+           r"QC.dir/\1.het.gz")
+def calcInbreeding(infiles, outfile):
     '''
     Detect individuals with excess of heterozygosity - indicative
     of population outbreeding/admixture and/or genotyping
     errors
+    Also relevant to inbreeding, i.e. depletion of heterozygosity
+    indicates individuals more related to themselves than expected
     '''
 
-    pass
+    bed_file = infiles[0]
+    fam_file = infiles[1][0]
+    bim_file = infiles[1][1]
 
+    plink_files = ",".join([bed_file, fam_file, bim_file])
+    temp_file = P.getTempfilename(shared=True)
+
+    job_memory = "4G"
+    statement = '''
+    python /ifs/devel/projects/proj045/gwas_pipeline/geno2qc.py
+    --program=plink2
+    --input-file-format=plink_binary
+    --method=summary
+    --summary-method=inbreeding
+    --summary-parameter=gz
+    --output-file-pattern=%(temp_file)s;
+    zcat %(temp_file)s.hets.gz | tr -s ' ' '\\t' |
+    sed -E 's/^[[:space:]]|[[:space:]]$//g' | gzip > %(outfile)s
+    '''
+
+    P.run()
+
+
+@follows(calcInbreeding)
+@transform(calcInbreeding,
+           regex("QC.dir/(.+).hets.gz"),
+           r"QC.dir/\1.hets_exclude")
+def findExcessHeterozygotes(infiles, outfile):
+    '''
+    Calculate the heterozygosity rate and flag individuals
+    with excess heterozygosity indicative of population
+    admixture or genotyping errors/contamination.
+    Also flag individuals with high inbreeding coefficient
+    '''
+
+    job_memory = "2G"
+    statement = '''
+    python /ifs/devel/projects/proj045/gwas_pipeline/pheno2pheno.py
+    --task=flag_hets
+    --log=%(outfile)s.log
+    %(infile)s
+    > %(outfile)s
+    '''
+
+    P.run()
+
+
+@follows(mergePlinkFiles,
+         mkdir("grm.dir"))
+@transform("genome.dir/*.*",
+           regex("plink.dir/(.+).bed"),
+           add_inputs([r"plink.dir/\1.fam",
+                       r"plink.dir/\1.bim"]),
+           r"grm.dir/\1.grm.N.bin")
+def makeGRM(infiles, outfiles):
+    '''
+    Calculate the realised GRM across all LD trimmed
+    variants
+    '''
+
+    job_threads = PARAMS['grm_threads']
+    job_memory = "10G"
+
+    bed_file = infiles[0]
+    fam_file = infiles[1][0]
+    bim_file = infiles[1][1]
+
+    plink_files = ",".join([bed_file, fam_file, bim_file])
+    out_pattern = ".".join(outfiles.split(".")[:-5])
+
+    statement = '''
+    python /ifs/devel/projects/proj045/gwas_pipeline/geno2assoc.py
+    --program=gcta
+    --input-file-format=plink_binary
+    --method=matrix
+    --method-compression=bin
+    --matrix-form=grm
+    --output-file-pattern=%(out_pattern)s
+    --threads=%(grm_threads)s
+    %(plink_files)s
+    '''
+
+    print out_pattern
+
+
+@follows(makeGRM,
+         mkdir("pca.dir"))
+@transform("grm.dir/*.grm.bin",
+           regex("grm.dir/(.+).grm.bin"),
+           add_inputs([r"grm.dir/\1.grm.N.bin",
+                       r"grm.dir/\1.grm.id"]),
+           r"pca.dir/\1.eigenvec")
+def runPCA(infiles, outfile):
+    '''
+    Run PCA on GRM(s)
+    '''
+
+    job_threads = PARAMS['pca_threads']
+    n_file = infiles[0]
+    bin_file = infiles[1][0]
+    id_file = infiles[1][1]
+
+    grm_files = ",".join([n_file, bin_file, id_file])
+
+    out_pattern = outfiles.split(".")[-2]
+
+    statement = '''
+    python /ifs/devel/projects/proj045/gwas_pipeline/geno2assoc.py
+    --program=gcta
+    --input-file-format=GRM_binary
+    --method=pca
+    --principal-components=%(pca_components)i
+    --threads=%(job_threads)s
+    --output-file-pattern=%(out_pattern)s
+    %(grm_files)s
+    '''
+
+    print grm_files
+    
 
 if PARAMS['candidate_region']:
     @follows(convertToPlink,
@@ -639,80 +785,6 @@ if PARAMS['candidate_region']:
 else:
     pass
 
-@jobs_limit(3)
-@follows(convertToPlink,
-         mkdir("grm.dir"))
-@transform("plink.dir/*.*",
-           regex("plink.dir/(.+).bed"),
-           add_inputs([r"plink.dir/\1.fam",
-                       r"plink.dir/\1.bim"]),
-           r"grm.dir/\1.grm.N.bin")
-def makeGRM(infiles, outfiles):
-    '''
-    Calculate the realised GRM per chromosome from
-    Plink binary format files
-    No filtering at this stage?
-    '''
-
-    job_threads = PARAMS['grm_threads']
-    job_memory = "10G"
-
-    bed_file = infiles[0]
-    fam_file = infiles[1][0]
-    bim_file = infiles[1][1]
-
-    plink_files = ",".join([bed_file, fam_file, bim_file])
-    out_pattern = ".".join(outfiles.split(".")[:-5])
-
-    statement = '''
-    python /ifs/devel/projects/proj045/gwas_pipeline/geno2assoc.py
-    --program=gcta
-    --input-file-format=plink_binary
-    --method=matrix
-    --method-compression=bin
-    --matrix-form=grm
-    --output-file-pattern=%(out_pattern)s
-    --threads=%(grm_threads)s
-    %(plink_files)s
-    '''
-
-    print out_pattern
-
-@jobs_limit(3)
-@follows(makeGRM,
-         mkdir("pca.dir"))
-@transform("grm.dir/*.grm.bin",
-           regex("grm.dir/(.+).grm.bin"),
-           add_inputs([r"grm.dir/\1.grm.N.bin",
-                       r"grm.dir/\1.grm.id"]),
-           r"pca.dir/\1.eigenvec")
-def runPCA(infiles, outfile):
-    '''
-    Run PCA on GRM(s)
-    '''
-
-    job_threads = PARAMS['pca_threads']
-    n_file = infiles[0]
-    bin_file = infiles[1][0]
-    id_file = infiles[1][1]
-
-    grm_files = ",".join([n_file, bin_file, id_file])
-
-    out_pattern = outfiles.split(".")[-2]
-
-    statement = '''
-    python /ifs/devel/projects/proj045/gwas_pipeline/geno2assoc.py
-    --program=gcta
-    --input-file-format=GRM_binary
-    --method=pca
-    --principal-components=%(pca_components)i
-    --threads=%(job_threads)s
-    --output-file-pattern=%(out_pattern)s
-    %(grm_files)s
-    '''
-
-    print grm_files
-    
 @follows(convertToPlink,
          mkdir("gwas.dir"))
 @transform("plink.dir/chr*",

@@ -2618,3 +2618,44 @@ def findDuplicateVariants(bim_file, take_last=False):
     E.info("%i overlapping SNVs and INDELs found" % len(overlap_vars))
     
     return dups_alleles, tri_alleles, overlap_vars
+
+def flagExcessHets(hets_file):
+    '''
+    Take output from Plink 1.9 --het command
+    calculate heterozygosity rate and flag individuals
+    with heterozygosity > 1 s.d. from the mean
+    value.
+    This assumes all individuals are from the same
+    population, and thus form a homogenous cluster,
+    with only outliers at the extremes.
+    Visualise the data, if there are multiple apparent
+    clusters then filter for ethnicity/ancestry first
+    '''
+    if hets_file.endswith("gz"):
+        compression = "gzip"
+    else:
+        compression = None
+
+    het_df = pd.read_table(hets_file, header=0, index_col=None,
+                           sep="\t", compression=compression)
+    nmiss = pd.Series(het_df.loc[:, "N(NM)"], dtype=np.float64)
+    nhoms = het_df.loc[:, "O(HOM)"]
+    het_df["het_rate"] = (nmiss - nhoms) / nmiss
+    # get mean value and std, set upper and lower thresholds
+    mean_het = np.mean(het_df.loc[:, "het_rate"].values)
+    sd_het = np.std(het_df.loc[:, "het_rate"].values)
+
+    upper = mean_het + (3 * sd_het)
+    lower = mean_het - (3 * sd_het)
+
+    hi_hets = het_df[het_df["het_rate"] > upper]
+    lo_hets = het_df[het_df["het_rate"] < lower]
+
+    E.info("%i individuals with high heterozygosity" % len(hi_hets))
+    E.info("%i individuals with low heterozygosity" % len(lo_hets))
+
+    hi_hets["exclude"] = "high_heterozygosity"
+    lo_hets["exclude"] = "low_heterozygosity"
+    all_flags = lo_hets.append(hi_hets)
+
+    return all_flags
