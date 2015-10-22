@@ -4,7 +4,7 @@
 #
 #   $Id$
 #
-#   Copyright (C) 2009 Andreas Heger
+#   Copyright (C) 2009 Mike Morgan
 #
 #   This program is free software; you can redistribute it and/or
 #   modify it under the terms of the GNU General Public License
@@ -21,10 +21,10 @@
 #   Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 ###############################################################################
 """===========================
-Pipeline template
+Pipeline GWAS
 ===========================
 
-:Author: Andreas Heger
+:Author: Mike Morgan
 :Release: $Id$
 :Date: |today|
 :Tags: Python
@@ -416,6 +416,7 @@ def ldPruneSNPs(infiles, outfile):
     --exclude-snps=%(exclude_file)s
     --method=ld_prune
     --use-kb
+    --min-allele-frequency=0.01
     --prune-method=%(ld_prune_method)s
     --step-size=%(ld_prune_step)s
     --window-size=%(ld_prune_window)s
@@ -451,23 +452,28 @@ def makeTrimmedData(infiles, outfile):
 
     plink_files = ",".join([bed_file, fam_file, bim_file])
     outpattern = ".".join(outfile.split(".")[:-1])
-    job_memory = "4G"
-    job_threads = 12
+    job_memory = "32G"
+    job_threads = 1
 
     tmpfile = P.getTempFilename(shared=True)
-
-    job_memory = "32G"
 
     # find duplicates
     state1 = '''
     python /ifs/devel/projects/proj045/gwas_pipeline/geno2geno.py
+    --log=%(outfile)s.exclude.log
     --task=detect_duplicates
     --outfile-pattern=%(tmpfile)s
     %(bim_file)s
     '''
+
     exclude_file = tmpfile + ".exclude"
 
     state2 = '''
+    cat %(tmpfile)s.triallelic %(tmpfile)s.duplicates
+    %(tmpfile)s.overlapping | sort | uniq >> %(exclude_file)s
+    '''
+
+    state3 = '''
     python /ifs/devel/projects/proj045/gwas_pipeline/geno2assoc.py
     --program=plink2
     --input-file-format=plink_binary
@@ -482,7 +488,7 @@ def makeTrimmedData(infiles, outfile):
     %(plink_files)s
     '''
 
-    statement = ";".join([state1, state2])
+    statement = ";".join([state1, state2, state3])
 
     P.run()
 
@@ -531,7 +537,7 @@ def mergePlinkFiles(infiles, outfile):
 @transform(mergePlinkFiles,
            regex("genome.dir/(.+).bed"),
            add_inputs([r"genome.dir/\1.fam",
-                       r"genome.dir/\2.bim"]),
+                       r"genome.dir/\1.bim"]),
            r"QC.dir/\1.het.gz")
 def calcInbreeding(infiles, outfile):
     '''
@@ -547,7 +553,7 @@ def calcInbreeding(infiles, outfile):
     bim_file = infiles[1][1]
 
     plink_files = ",".join([bed_file, fam_file, bim_file])
-    temp_file = P.getTempfilename(shared=True)
+    temp_file = P.getTempFilename(shared=True)
 
     job_memory = "4G"
     statement = '''
@@ -557,8 +563,10 @@ def calcInbreeding(infiles, outfile):
     --method=summary
     --summary-method=inbreeding
     --summary-parameter=gz
-    --output-file-pattern=%(temp_file)s;
-    zcat %(temp_file)s.hets.gz | tr -s ' ' '\\t' |
+    --output-file-pattern=%(temp_file)s
+    --log=%(outfile)s.log
+    %(plink_files)s;
+    zcat %(temp_file)s.het.gz | tr -s ' ' '\\t' |
     sed -E 's/^[[:space:]]|[[:space:]]$//g' | gzip > %(outfile)s
     '''
 
@@ -567,14 +575,18 @@ def calcInbreeding(infiles, outfile):
 
 @follows(calcInbreeding)
 @transform(calcInbreeding,
-           regex("QC.dir/(.+).hets.gz"),
-           r"QC.dir/\1.hets_exclude")
-def findExcessHeterozygotes(infiles, outfile):
+           regex("QC.dir/(.+).het.gz"),
+           r"QC.dir/\1.het_exclude")
+def findExcessHeterozygotes(infile, outfile):
     '''
     Calculate the heterozygosity rate and flag individuals
     with excess heterozygosity indicative of population
     admixture or genotyping errors/contamination.
-    Also flag individuals with high inbreeding coefficient
+
+    Also flag individuals with high inbreeding coefficient.
+    Plot these - if there are multiple clusters - indicates
+    additional populations of individuals - see UKBiobank
+    documentation for details
     '''
 
     job_memory = "2G"
@@ -591,47 +603,52 @@ def findExcessHeterozygotes(infiles, outfile):
 
 @follows(mergePlinkFiles,
          mkdir("grm.dir"))
-@transform("genome.dir/*.*",
-           regex("plink.dir/(.+).bed"),
-           add_inputs([r"plink.dir/\1.fam",
-                       r"plink.dir/\1.bim"]),
+@transform("genome.dir/WholeGenome.*",
+           regex("genome.dir/(.+).bed"),
+           add_inputs([r"genome.dir/\1.fam",
+                       r"genome.dir/\1.bim"]),
            r"grm.dir/\1.grm.N.bin")
 def makeGRM(infiles, outfiles):
     '''
     Calculate the realised GRM across all LD trimmed
     variants
+    Use parallelisation
     '''
 
     job_threads = PARAMS['grm_threads']
-    job_memory = "10G"
+    # memory per thread
+    job_memory = "12G"
 
     bed_file = infiles[0]
     fam_file = infiles[1][0]
     bim_file = infiles[1][1]
 
     plink_files = ",".join([bed_file, fam_file, bim_file])
-    out_pattern = ".".join(outfiles.split(".")[:-5])
+    out_pattern = ".".join(outfiles.split(".")[:-3])
 
+    # why does GCTA keep throwing memory errors??
     statement = '''
     python /ifs/devel/projects/proj045/gwas_pipeline/geno2assoc.py
-    --program=gcta
+    --program=plink2
+    --parallel=%(job_threads)s
     --input-file-format=plink_binary
+    --memory="120G"
     --method=matrix
-    --method-compression=bin
+    --matrix-compression=bin
     --matrix-form=grm
     --output-file-pattern=%(out_pattern)s
-    --threads=%(grm_threads)s
+    --log=%(outfiles)s.log
     %(plink_files)s
+    > %(outfiles)s.gcta.log
     '''
 
-    print out_pattern
-
+    P.run()
 
 @follows(makeGRM,
          mkdir("pca.dir"))
-@transform("grm.dir/*.grm.bin",
-           regex("grm.dir/(.+).grm.bin"),
-           add_inputs([r"grm.dir/\1.grm.N.bin",
+@transform("grm.dir/*.N.bin",
+           regex("grm.dir/(.+).grm.N.bin"),
+           add_inputs([r"grm.dir/\1.grm.bin",
                        r"grm.dir/\1.grm.id"]),
            r"pca.dir/\1.eigenvec")
 def runPCA(infiles, outfile):
@@ -643,14 +660,15 @@ def runPCA(infiles, outfile):
     n_file = infiles[0]
     bin_file = infiles[1][0]
     id_file = infiles[1][1]
-
+    job_memory = "11G"
     grm_files = ",".join([n_file, bin_file, id_file])
 
-    out_pattern = outfiles.split(".")[-2]
+    out_pattern = ".".join(outfile.split(".")[:-1])
 
     statement = '''
     python /ifs/devel/projects/proj045/gwas_pipeline/geno2assoc.py
     --program=gcta
+    --log=%(outfile)s.log
     --input-file-format=GRM_binary
     --method=pca
     --principal-components=%(pca_components)i
@@ -659,8 +677,8 @@ def runPCA(infiles, outfile):
     %(grm_files)s
     '''
 
-    print grm_files
-    
+    P.run()
+
 
 if PARAMS['candidate_region']:
     @follows(convertToPlink,
@@ -790,11 +808,13 @@ else:
 @transform("plink.dir/chr*",
            regex("plink.dir/(.+).bed"),
            add_inputs([r"plink.dir/\1.fam",
-                       r"plink.dir/\1.bim"]),
+                       r"plink.dir/\1.bim",
+                       r"phenotypes.dir/\1_British.tsv"]),
            r"gwas.dir/\1_assoc.assoc")
 def unadjustedAssociation(infiles, outfile):
     '''
     Run an unadjusted association analysis on SNPs MAF >= 1%
+    Need to condition on array batch - field 22000
     '''
 
     job_memory = "5G"
@@ -813,11 +833,13 @@ def unadjustedAssociation(infiles, outfile):
     --program=plink2
     --input-file-format=plink_binary
     --method=association
+    --keep=%(gwas_keep)s
+    --exclude=%()s
     --association-method=assoc
     --genotype-rate=0.01
     --indiv-missing=0.01
-    --hardy-weinberg=0.00001
-    --min-allele-frequency=0.01
+    --hardy-weinberg=0.000001
+    --min-allele-frequency=0.001
     --output-file-pattern=%(out_pattern)s
     --threads=%(candidate_threads)s
     --log=%(outfile)s.log
@@ -850,30 +872,91 @@ def plotChromosomeManhattan(infile, outfile):
     P.run()
 
 
-@follows(mkdir("dissect.dir"))
-@collate("%s/*" % PARAMS['data_dir'],
-         regex("%s/(.+).(.+)" % PARAMS['data_dir']),
-         r"dissect.dir/test_out")
-def test_dissect(infiles, outfile):
+@follows(mkdir("dissect.dir"),
+         mkdir("grm.dir"))
+@transform("data.dir/*sample.bed",
+           regex("data.dir/(.+).bed"),
+           r"grm.dir/\1.dat")
+def test_dissectGrmSingleFile(infiles, outfile):
     '''
     Test DISSECT for parallelised analysis
+    Make a GRM, then do PCA
     MUST have a separate phenotypes file with no header, but in plink format
+    for GWAS
     '''
 
-    job_memory = "256G"
+    job_memory = "1G"
     infiles = ",".join(infiles)
-    job_threads = 256
+    job_threads = 128
+    job_options = "-l h=!andromeda,h=!gandalf,h=!saruman"
     job_queue = "mpi.q"
     cluster_parallel_environment = " mpi "
     statement = '''
-    mpirun --np %(job_threads)s
+    mpirun
     dissect
-    --gwas
-    --bfile data.dir/chr22impv1u
-    --pheno data.dir/dissect.pheno
-    --out dissect.dir/out_file
+    --bfile data.dir/subsample
+    --make-grm
+    --out grm.dir/subsample
     '''
 
+    P.run()
+
+@follows(mkdir("dissect.dir"),
+         mkdir("grm.dir"))
+@transform("*_list.tsv",
+           regex("(.+)_list.tsv"),
+           r"grm.dir/\1.dat")
+def test_dissectGrmManyFiles(infiles, outfile):
+    '''
+    Test DISSECT for parallelised analysis
+    Make a GRM, then do PCA
+    MUST have a separate phenotypes file with no header, but in plink format
+    for GWAS
+    '''
+
+    job_memory = "2G"
+    infiles = ",".join(infiles)
+    job_threads = 128
+    job_options = "-l h=!andromeda,h=!gandalf,h=!saruman"
+    job_queue = "all.q"
+    cluster_parallel_environment = " mpi "
+    statement = '''
+    mpirun
+    dissect
+    --bfile-list subsample_list.tsv
+    --make-grm
+    --grm-join-method 1
+    --out grm.dir/subsample
+    > dissect_test.log
+    '''
+
+    P.run()
+
+@follows(test_dissectGrmManyFiles,
+         mkdir("pca.dir"))
+@transform("grm.dir/*.dat",
+           regex("grm.dir/(.+).dat"),
+           r"pca.dir/\1.pca.eigenvalues")
+def dissectPCA(infile, outfile):
+    '''
+    Test DISSECT PCA on grms
+    '''
+    job_memory = "2G"
+    infiles = ",".join(infiles)
+    job_threads = 128
+    job_options = "-l h=!andromeda,h=!gandalf,h=!saruman"
+    job_queue = "all.q"
+    cluster_parallel_environment = " mpi "
+    statement = '''
+    mpirun
+    dissect
+    --pca
+    --grm grm.dir/subsample
+    --out grm.dir/subsample
+    --num-eval 20
+    > dissect_test.log
+    '''
+    
     P.run()
 
 # ---------------------------------------------------

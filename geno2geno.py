@@ -97,9 +97,9 @@ def main(argv=None):
         mafs = gwas.countByVariantAllele(options.ped_file,
                                          options.map_file)
 
-        options.stdout.write("SNP\tMAF\n")
-        for x,y in mafs:
-            options.stdout.write("%s\t%s\n" % (x, y))
+        mafs.to_csv(options.stdout,
+                    index_col=None,
+                    sep="\t")
 
     elif options.task == "penetrance":
         summary, pens = gwas.calcPenetrance(options.ped_file,
@@ -113,7 +113,7 @@ def main(argv=None):
 
     elif options.task == "detect_duplicates":
         # find variants with duplicated position and shared reference
-        # allele indicative of triallelic variants
+        # allele indicative of triallelic variants - also same ID
         # ouput to a filter list
         infile = argv[-1]
         dups, tris, oves = gwas.findDuplicateVariants(bim_file=infile,

@@ -61,7 +61,7 @@ def main(argv=None):
     parser.add_option("--input-file-format", dest="file_format", type="choice",
                       choices=["plink", "plink_binary", "oxford",
                                "oxford_binary", "vcf", "GRM_binary",
-                               "GRM_gz"],
+                               "GRM_gz", "GRM_plink"],
                       help="format of input files")
 
     parser.add_option("--phenotypes-file", dest="pheno_file", type="string",
@@ -312,6 +312,12 @@ def main(argv=None):
                       help="the number of threads to use for multi-threaded "
                       "processes")
 
+    parser.add_option("--memory", dest="memory", type="string",
+                      help="amount of memory to reserve for the task")
+
+    parser.add_option("--parallel", dest="parallel", type="int",
+                      help="number of jobs to split task into")
+
     # add common options (-h/--help, ...) and parse command line
     (options, args) = E.Start(parser, argv=argv)
 
@@ -323,7 +329,9 @@ def main(argv=None):
                         matrix_options=None,
                         matrix_compress="gz",
                         random_seed=random.randint(0, 19999),
-                        sample_update=None)
+                        sample_update=None,
+                        memory="30G",
+                        parallel=None)
 
     if not options.infile_pattern:
         infiles = (argv[-1]).split(",")
@@ -465,7 +473,9 @@ def main(argv=None):
 
     gwas_object.build_statement(infiles=geno_files,
                                 outfile=options.out_pattern,
-                                threads=options.threads)
+                                threads=options.threads,
+                                memory=options.memory,
+                                parallel=options.parallel)
 
     # write footer and output benchmark information.
     E.Stop()

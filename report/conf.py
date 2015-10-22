@@ -1,1 +1,1 @@
-/ifs/devel/projects/proj045/src/pipeline_gwas/conf.py
+/ifs/devel/projects/proj045/gwas_pipeline/pipeline_gwas/conf.py

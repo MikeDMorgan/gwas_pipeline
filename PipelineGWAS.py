@@ -77,7 +77,7 @@ class FileGroup(object):
 
         self.files = files
         self.file_format = file_format
-        self.phenotypes = phenotypes
+        self.pheno_file = phenotypes
         self.genotype_format = genotype_format
         self.covariate_files = covariate_files
         self.set_file_prefix(files)
@@ -233,6 +233,24 @@ class FileGroup(object):
                 raise ValueError("GRM binary file is missing, please "
                                  "specify")
 
+        elif self.file_format == "GRM_plink":
+            self.id_file = [ig for ig in infiles if re.search(".rel.id",
+                                                              ig)][0]
+            self.rel_file = [gn for gn in infiles if re.search(".rel.N.bin",
+                                                             gn)][0]
+            # check files exits
+            try:
+                assert self.id_file
+            except AssertionError:
+                raise ValueError("GRM ids file is missing, please "
+                                 "specify")
+            try:
+                assert self.rel_file
+            except AssertionError:
+                raise ValueError("rel.N file is missing, please "
+                                 "specify")
+
+
     def set_phenotype(self, pheno_file=None, pheno=1):
         '''
         Set the phenotype for a set of individuals
@@ -351,7 +369,7 @@ class GCTA(GWASProgram):
             statement = " --bfile %s " % infiles.name
         elif file_format == "oxford" or file_format == "oxford_binary":
             statement = " --data %s" % infiles.name
-        elif file_format == "GRM_binary":
+        elif file_format == "GRM_binary" or file_format == "GRM_plink":
             statement = " --grm %s " % infiles.name
         else:
             raise AttributeError("file format is not defined or recognised."
@@ -635,7 +653,8 @@ class GCTA(GWASProgram):
 
         self.statement["matrix"] = state       
 
-    def build_statement(self, infiles, outfile, threads=None):
+    def build_statement(self, infiles, outfile, threads=None,
+                        memory=None, parallel=None):
         '''
         Build statement and execute from components
         '''
@@ -813,10 +832,13 @@ class Plink2(GWASProgram):
 
         self.statement["matrix"] = state
 
-    def genetic_relationship_matrix(self, shape, compression, metric):
+    def genetic_relationship_matrix(self, shape, compression, metric,
+                                    options=None):
         '''
         Calculate genomic pair-wise distance matrix between
         individuals using proportion of IBS alleles
+        Requires the use of the Plink2 parallelisation to run with large
+        cohorts of patients
         '''
 
         # check shape is compatible
@@ -838,7 +860,7 @@ class Plink2(GWASProgram):
             state = self._matrices(matrix_type="grm", shape=shape,
                                    compression=compression, options=metric)
         else:
-            E.info("%s metric not recognised.  Running with default Fhat1")
+            E.info("%s metric not recognised.  Running with default Fhat1" % metric)
             state = self._matrices(matrix_type="grm", shape=shape,
                                    compression=compression)
 
@@ -884,7 +906,7 @@ class Plink2(GWASProgram):
             self._construct_filters(max_allele_frequency=filter_value)
         elif filter_type == "exclude_snp":
             self._construct_filters(exclude_snp=filter_value)
-        elif filter_type == "exclude_snps":
+        elif filter_type == "exclude":
             self._construct_filters(exclude=filter_value)
         elif filter_type == "extract":
             self._construct_filters(extract=filter_value)
@@ -948,6 +970,8 @@ class Plink2(GWASProgram):
             statement = " --bfile %s " % infiles.name
         elif file_format == "oxford" or file_format == "oxford_binary":
             statement = " --data %s" % infiles.name
+        elif file_format == "GRM_plink":
+            statement = " --grm.bin  %s " %infiles.name
         else:
             raise AttributeError("file format is not defined or recognised."
                                  "Please define the input corectly when "
@@ -1243,10 +1267,20 @@ class Plink2(GWASProgram):
                                    "report_nonmissing": " --merge-mode 7"},
                     "find_duplicates": {"same_ref": " --list-duplicate-vars require-same-ref ",
                                         "id_match": " --list-duplicate-vars ids-only ",
-                                        "suppress_first": " --list-duplicate-vars suppress-first"}}
+                                        "suppress_first": " --list-duplicate-vars suppress-first"},
+                    "pca": " --pca %s "}
+
 
         for task, value in kwargs.iteritems():
-            if task != "parameter":
+            # check for PCA first as it is not nested in task_map
+            if task == "pca":
+                try:
+                    state = task_map[task] % value
+                    statement.append(state)
+                except TypeError:
+                    statement.append(task_map[task])
+                statement.append
+            elif task != "parameter":
                 try:
                     # sub_task is a nested dictionary
                     sub_task = task_map[task]
@@ -1559,6 +1593,16 @@ class Plink2(GWASProgram):
 
         self.statement["assoc"] = " ".join(statement)
 
+
+    def PCA(self, n_pcs="20"):
+        '''
+        Perform PCA analysis on previosly generated GRM, output the number n
+        principal componets, default = 20
+        '''
+
+        self._run_tasks(pca=n_pcs)
+
+
     def _dimension_reduction(self, **kwargs):
         '''
         Use PCA to perform dimensionality reduction on
@@ -1590,10 +1634,12 @@ class Plink2(GWASProgram):
         elif matrix_type == "genomic":
             flag = " --distance 1-ibs "
         elif matrix_type == "grm":
-            flag = " --make-rel "
+            flag = " --make-grm-bin "
 
         if options:
             statement.append(" ".join([flag, shape, compression, options]))
+        elif matrix_type == "grm":
+            statement.append(flag)
         else:
             statement.append(" ".join([flag, shape, compression]))
 
@@ -1721,7 +1767,7 @@ class Plink2(GWASProgram):
         self.statement["QC"] = " ".join(state)
 
     def build_statement(self, infiles, outfile, threads=None,
-                        memory="60G"):
+                        memory="60G", parallel=None):
         '''
         Build statement and execute from components
         '''
@@ -1785,7 +1831,23 @@ class Plink2(GWASProgram):
             outpath = "/".join([os.getcwd(), outfile])
             statement.append(" --out %s " % outpath)
 
-        os.system(" ".join(statement))
+        # parallelisation only really applies to GRM calculation
+        # at the moment
+        if parallel:
+            statements = []
+            cat_state = [" cat "]
+
+            for i in range(1, parallel+1):
+                p_state = statement[:] # copy list, assigning just makes a pointer
+                p_state.append(" --parallel %i %i " % (i, parallel))
+                statements.append(" ".join(p_state))
+                cat_state.append(" %s.grm.bin.%i " % (outpath, i))
+            cat_state.append(" > %s.grm.N.bin " % outpath)
+            statements.append(" ".join(cat_state))
+            os.system(";".join(statements))
+        else:
+            os.system(" ".join(statement))
+        
 
 
 class GWASResults(object):
@@ -2308,8 +2370,17 @@ def countByVariantAllele(ped_file, map_file):
                     homA2[i, i] += 1
     allele_counts = ((2 * homA2) + het)/float(2 * tcount)
     mafs = 1 - allele_counts.diagonal()
+    maf_df = pd.DataFrame(zip(variant_ids, mafs), columns=["SNP", "MAF"],
+                          index=[x for x,y in enumerate(variant_ids)])
+    maf_df["A2_HOMS"] = (2 * homA1).diagonal()
+    maf_df["A2_HETS"] = het.diagonal()
+    maf_df.index = maf_df["SNP"]
+    maf_df.drop(["SNP"], axis=1, inplace=True)
 
-    return zip(variant_ids, mafs)
+    E.info("allele frequencies calculated over %i SNPs and "
+           "%i individuals" % (len(genos), tcount))
+
+    return maf_df
 
 
 def calcPenetrance(ped_file, map_file, mafs=None,
@@ -2352,7 +2423,6 @@ def calcPenetrance(ped_file, map_file, mafs=None,
                                "pos": attrs[-1].strip("\n")}
 
     variant_ids = variants.keys()
-
     case_mat = np.zeros((len(variant_ids), len(variant_ids)),
                         dtype=np.float64)
 
@@ -2372,7 +2442,7 @@ def calcPenetrance(ped_file, map_file, mafs=None,
             iid = indiv_split[1]
             mid = indiv_split[2]
             pid = indiv_split[3]
-            gender = indiv_split[4]
+            gender = int(indiv_split[4])
             phen = int(indiv_split[5])
             if phen != -9:
                 if subset == "cases":
@@ -2386,25 +2456,26 @@ def calcPenetrance(ped_file, map_file, mafs=None,
                                   alleles[i+1]]) for i in range(0, len(alleles), 2)]
                 tcount += 1
 
-                A1 = np.zeros(len(genos), dtype=np.int64)
+                het = np.zeros(len(genos), dtype=np.float64)
+                hom = np.zeros(len(genos), dtype=np.float64)
 
                 for i in range(len(genos)):
                     # missing values are coded '00' in plink format
-                    # A2 homs are coded '00' in plink format
-                    if genos[i] == "00":
-                        A1[i] = 0
-                    elif genos[i] == "11":
-                        A1[i] += 2
+                    # A2 homs are coded '11' in plink format
+                    if genos[i] == "11":
+                        hom[i] += 1
                     elif genos[i] == "12":
-                        A1[i] += 1
+                        het[i] += 1
                     else:
                         pass
 
-                gen_mat = np.outer(A1, A1)
-                # diagonals will contain 4's, need these
-                # to be 1's or 2's
-                gen_mat = gen_mat/2
-                
+                hom_mat = np.outer(hom, hom)
+                het_mat = np.outer(het, het)
+                homs = hom_mat.diagonal()
+                het_mat[np.diag_indices(len(genos))] = homs
+
+                gen_mat = het_mat
+
                 # separate matrix for subset
                 # reference is always level 2 for plink files,
                 # either cases or females
@@ -2417,30 +2488,69 @@ def calcPenetrance(ped_file, map_file, mafs=None,
             else:
                 pass
 
+    E.info("alleles counted over %i SNPs "
+           "and %i individuals, of which %i are "
+           "in the %s subset" % (len(genos), tcount, ncases, subset))
+
     penetrance = np.divide(case_mat, all_mat)
     # round for the sake of aesthetics
-    penetrance = np.round(penetrance, decimals=3)
+    penetrance = np.round(penetrance, decimals=5)
     pen_df = pd.DataFrame(penetrance, columns=variant_ids,
                           index=variant_ids)
     pen_df = pen_df.fillna(0.0)
+
+    case_df = pd.DataFrame(case_mat, columns=variant_ids,
+                           index=variant_ids)
+    all_df = pd.DataFrame(all_mat, columns=variant_ids,
+                          index=variant_ids)
     # plot heatmap of penetrances as percentages
     indf = pen_df * 100
     py2ri.activate()
 
     # only plot penetrances > 0%
     r_pen = py2ri.py2ri_pandasdataframe(indf)
+    r_cases = py2ri.py2ri_pandasdataframe(case_df)
+    r_all = py2ri.py2ri_pandasdataframe(all_df)
     R.assign("pen.df", r_pen)
+    R.assign("case.df", r_cases)
+    R.assign("all.df", r_all)
     R('''suppressPackageStartupMessages(library(gplots))''')
     R('''suppressPackageStartupMessages(library(RColorBrewer))''')
 
+    # penetrances
+    E.info("plotting penetrance matrix")
     R('''hmcol <- colorRampPalette(brewer.pal(9, "BuGn"))(100)''')
     R('''rowpen <- pen.df[rowSums(pen.df) > 0,]''')
     R('''colpen <- rowpen[,colSums(rowpen) > 0]''')
-    R('''png("%s/penetrance-matrix.png", width=540, height=540)''' % os.getcwd())
+    R('''png("%s/penetrance-matrix.png", width=720, height=720)''' % os.getcwd())
     R('''heatmap.2(as.matrix(colpen), trace="none", col=hmcol,'''
       '''dendrogram="none", Colv=colnames(colpen), key=FALSE, '''
       '''Rowv=rownames(colpen), margins=c(10,10), cellnote=round(colpen),'''
       '''notecol="white")''')
+    R('''dev.off()''')
+
+    E.info("plotting case counts matrix")
+    R('''rowcase <- case.df[rowSums(case.df) > 0,]''')
+    R('''colcase <- rowcase[,colSums(rowcase) > 0]''')
+    R('''png("%s/cases-matrix.png", width=720, height=720)''' % os.getcwd())
+    R('''heatmap.2(as.matrix(colcase), trace="none", col=rep("#F0F8FF", 100),'''
+      '''dendrogram="none", Colv=colnames(colcase), key=FALSE, '''
+      '''colsep=seq(1:length(colnames(colcase))), '''
+      '''rowsep=seq(1:length(rownames(colcase))),'''
+      '''Rowv=rownames(colcase), margins=c(10,10), cellnote=round(colcase),'''
+      '''notecol="black")''')
+    R('''dev.off()''')
+
+    E.info("plotting all individuals matrix")
+    R('''rowall <- all.df[rownames(colcase),]''')
+    R('''colall <- rowall[,colnames(colcase)]''')
+    R('''png("%s/all-matrix.png", width=720, height=720)''' % os.getcwd())
+    R('''heatmap.2(as.matrix(colall), trace="none", col=rep("#F0F8FF", 100),'''
+      '''dendrogram="none", Colv=colnames(colall), key=FALSE, '''
+      '''colsep=seq(1:length(colnames(colall))), '''
+      '''rowsep=seq(1:length(rownames(colall))), '''
+      '''Rowv=rownames(colall), margins=c(10,10), cellnote=round(colall),'''
+      '''notecol="black")''')
     R('''dev.off()''')
 
     # plot MAF vs homozygosity
@@ -2460,12 +2570,13 @@ def calcPenetrance(ped_file, map_file, mafs=None,
     out_df = summaryPenetrance(maf_df=maf_df,
                                case_counts=case_mat,
                                variants=variant_ids,
-                               n_cases=ncases)
+                               n_cases=ncases,
+                               n_total=tcount)
     return out_df, pen_df
 
 
 def summaryPenetrance(maf_df, case_counts,
-                      variants, n_cases):
+                      variants, n_cases, n_total):
     '''
     Summarise genotype counts and proportion of cases explained
     by the observed homozygotes and compound heterozygotes.
@@ -2478,21 +2589,22 @@ def summaryPenetrance(maf_df, case_counts,
     # diagonal of the case_counts array
     homozyg_cases = case_counts.diagonal()
     homozyg_series = pd.Series({x: y for x, y in zip(variants,
-                                                     homozyg_cases)})/2
+                                                     homozyg_cases)})
 
     # heterozygotes are on the off-diagonal elements
     # get all off diagonal elements by setting diagonals to zero
     # matrix is diagonal symmetric
     np.fill_diagonal(case_counts, 0)
-    
+
     het_counts = np.sum(case_counts, axis=0)
     het_series = pd.Series({x: y for x, y in zip(variants,
-                                                  het_counts)})                                                  
-    out_df = pd.DataFrame(columns=["homozygote_cases", 
+                                                  het_counts)})
+    out_df = pd.DataFrame(columns=["homozygote_cases",
                                    "heterozygote_cases"],
                           index=maf_df.index)
     out_df["MAF"] = maf_df["MAF"]
     out_df["homozygote_cases"] = np.round(homozyg_series, 1)
+    out_df["expected_cases"] = np.round(((out_df["MAF"] ** 2) * n_total), 3)
     out_df["heterozygote_cases"] = het_series
     out_df["hom_prop_explained"] = np.round(homozyg_series/float(n_cases), 3)
     out_df["het_prop_explained"] = np.round(het_series/float(n_cases), 3)
@@ -2517,12 +2629,13 @@ def plotPenetrances(plotting_df):
     R.assign("hom.df", r_plot)
 
     R('''suppressPackageStartupMessages(library(ggplot2))''')
-    R('''png("%s/penetrance-plot.png", height=540, width=540)''' % os.getcwd())
+    R('''png("%s/penetrance-plot.png", height=720, width=720)''' % os.getcwd())
     R('''pen_p <- ggplot(hom.df, aes(x=explained_by_homozygotes, y=MAF, colour=SNP)) + '''
       '''geom_point(size=4) + theme_bw() + '''
       '''geom_text(aes(label=explained_by_homozygotes),'''
       '''colour="black",vjust=0.5, hjust=0.5) + '''
-      '''labs(x="Number of Red haired homozygotes", y="MAF")''')
+      '''labs(x="Number of Red haired homozygotes", y="MAF") + '''
+      '''theme(axis.title=element_text(size=10, colour="black"))''')
     R('''print(pen_p)''')
     R('''dev.off()''')
 
@@ -2574,9 +2687,17 @@ def findDuplicateVariants(bim_file, take_last=False):
     ref_series = pd.Series(ref_alleles)
     alt_series = pd.Series(minor_alleles)
 
+    # a few variants have duplicate IDs - count these as duplicates
+    # and add to the exclusion list - these won't be identified
+    # based on shared position necessarily - force add them
+    ref_first = ref_series[ref_series.duplicated(take_last=False)]
+    ref_last = ref_series[ref_series.duplicated(take_last=True)]
+    ref_dups = set(ref_first.index).union(ref_last.index)
+
     # union of take first and take last
     dup_all = set(dup_last.index).union(set(dup_first.index))
-    dup_idx = np.array([sx for sx in dup_all])
+    dup_complete = dup_all.union(ref_dups)
+    dup_idx = np.array([sx for sx in dup_complete])
     dup_idx.sort()
 
     # make a dataframe to hold all triallelic and duplicate variants
@@ -2623,7 +2744,7 @@ def flagExcessHets(hets_file):
     '''
     Take output from Plink 1.9 --het command
     calculate heterozygosity rate and flag individuals
-    with heterozygosity > 1 s.d. from the mean
+    with heterozygosity > 3 s.d. from the mean
     value.
     This assumes all individuals are from the same
     population, and thus form a homogenous cluster,

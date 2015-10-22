@@ -139,6 +139,10 @@ def main(argv=None):
                                "wrights_fst"],
                       help="summary statistics to calculate")
 
+    parser.add_option("--summary-parameter", dest="sum_param", type="string",
+                      help="optional parameters that can be passed to summary "
+                      "statistics methods")
+
     parser.add_option("--genotype-rate", dest="filt_genotype_rate", type="string",
                       help="genotyping rate threshold.  SNPs below this threshold "
                       "will be excluded from analysis")
