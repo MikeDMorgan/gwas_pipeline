@@ -399,6 +399,11 @@ def ldPruneSNPs(infiles, outfile):
     and heterozygosity estimation
     '''
 
+    # this selects entirely INDELS if not MAF cut-off
+    # is used.  Evidently LD is low between indels,
+    # but not between SNPs and indels.  How many
+    # INDELs are on the Affy array, and how many
+    # are imputed?   What is their imputation accuracy?
     bed_file = infiles[0]
     fam_file = infiles[1][0]
     bim_file = infiles[1][1]
@@ -417,6 +422,7 @@ def ldPruneSNPs(infiles, outfile):
     --method=ld_prune
     --use-kb
     --min-allele-frequency=0.01
+    --ignore-indels
     --prune-method=%(ld_prune_method)s
     --step-size=%(ld_prune_step)s
     --window-size=%(ld_prune_window)s
@@ -653,7 +659,8 @@ def makeGRM(infiles, outfiles):
            r"pca.dir/\1.eigenvec")
 def runPCA(infiles, outfile):
     '''
-    Run PCA on GRM(s)
+    Run PCA on GRM(s) - this is too slow to execute on all 150K
+    individuals at once.
     '''
 
     job_threads = PARAMS['pca_threads']
@@ -719,6 +726,50 @@ if PARAMS['candidate_region']:
         '''
 
         P.run()
+
+    # make a GRM from the candidate region for MLM analysis
+
+    @follows(getCandidateRegion)
+    @transform("candidate.dir/*.bed",
+               regex("candidate.dir/(.+).bed"),
+               add_inputs([r"candidate.dir/\1.fam",
+                           r"candidate.dir/\1.bim"]),
+               r"grm.dir/\1.grm.N.bin")
+    def makeCandidateGRM(infiles, outfiles):
+        '''
+        Calculate the realised GRM across all candidate region
+        variants.   Use parallelisation.
+        '''
+
+        job_threads = PARAMS['grm_threads']
+        # memory per thread
+        job_memory = "12G"
+
+        bed_file = infiles[0]
+        fam_file = infiles[1][0]
+        bim_file = infiles[1][1]
+
+        plink_files = ",".join([bed_file, fam_file, bim_file])
+        out_pattern = ".".join(outfiles.split(".")[:-3])
+
+        # why does GCTA keep throwing memory errors??
+        statement = '''
+        python /ifs/devel/projects/proj045/gwas_pipeline/geno2assoc.py
+        --program=plink2
+        --parallel=%(job_threads)s
+        --input-file-format=plink_binary
+        --memory="120G"
+        --method=matrix
+        --matrix-compression=bin
+        --matrix-form=grm
+        --output-file-pattern=%(out_pattern)s
+        --log=%(outfiles)s.log
+        %(plink_files)s
+        > %(outfiles)s.gcta.log
+        '''
+
+        P.run()
+
 
     @follows(getCandidateRegion)
     @transform(getCandidateRegion,
@@ -808,8 +859,7 @@ else:
 @transform("plink.dir/chr*",
            regex("plink.dir/(.+).bed"),
            add_inputs([r"plink.dir/\1.fam",
-                       r"plink.dir/\1.bim",
-                       r"phenotypes.dir/\1_British.tsv"]),
+                       r"plink.dir/\1.bim"]),
            r"gwas.dir/\1_assoc.assoc")
 def unadjustedAssociation(infiles, outfile):
     '''
@@ -818,8 +868,9 @@ def unadjustedAssociation(infiles, outfile):
     '''
 
     job_memory = "5G"
-    job_threads = PARAMS['pca_threads']
+    job_threads = int(PARAMS['gwas_threads'])
 
+    mem = int(job_memory.strip("G")) * job_threads
     bed_file = infiles[0]
     fam_file = infiles[1][0]
     bim_file = infiles[1][1]
@@ -834,20 +885,68 @@ def unadjustedAssociation(infiles, outfile):
     --input-file-format=plink_binary
     --method=association
     --keep=%(gwas_keep)s
-    --exclude=%()s
     --association-method=assoc
     --genotype-rate=0.01
     --indiv-missing=0.01
     --hardy-weinberg=0.000001
     --min-allele-frequency=0.001
     --output-file-pattern=%(out_pattern)s
-    --threads=%(candidate_threads)s
-    --log=%(outfile)s.log
+    --threads=%(job_threads)s
+    --memory=%(mem)s
     -v 5
     %(plink_files)s
+    > %(outfile)s.log
     '''
 
     P.run()
+
+@follows(convertToPlink,
+         mkdir("gwas.dir"))
+@transform("plink.dir/chr*",
+           regex("plink.dir/(.+).bed"),
+           add_inputs([r"plink.dir/\1.fam",
+                       r"plink.dir/\1.bim"]),
+           r"gwas.dir/\1_assoc.assoc")
+def pcAdjustedAssociation(infiles, outfile):
+    '''
+    Run an association analysis on SNPs MAF >= 1%
+    adjusted for principal components
+    Need to condition on array batch - field 22000
+    '''
+
+    job_memory = "5G"
+    job_threads = int(PARAMS['gwas_threads'])
+
+    mem = int(job_memory.strip("G")) * job_threads
+    bed_file = infiles[0]
+    fam_file = infiles[1][0]
+    bim_file = infiles[1][1]
+
+    plink_files = ",".join([bed_file, fam_file, bim_file])
+
+    out_pattern = ".".join(outfile.split(".")[:-1])
+
+    statement = '''
+    python /ifs/devel/projects/proj045/gwas_pipeline/geno2assoc.py
+    --program=plink2
+    --input-file-format=plink_binary
+    --method=association
+    --keep=%(gwas_keep)s
+    --association-method=assoc
+    --genotype-rate=0.01
+    --indiv-missing=0.01
+    --hardy-weinberg=0.000001
+    --min-allele-frequency=0.001
+    --output-file-pattern=%(out_pattern)s
+    --threads=%(job_threads)s
+    --memory=%(mem)s
+    -v 5
+    %(plink_files)s
+    > %(outfile)s.log
+    '''
+
+    P.run()
+
 
 @follows(mkdir("plots.dir"),
          unadjustedAssociation)
@@ -860,6 +959,8 @@ def plotChromosomeManhattan(infile, outfile):
     from the unadjusted analysis
     '''
 
+    job_memory = "1G"
+
     statement = '''
     python /ifs/devel/projects/proj045/gwas_pipeline/assoc2plot.py
     --plot-type=manhattan
@@ -867,6 +968,33 @@ def plotChromosomeManhattan(infile, outfile):
     --save-path=%(outfile)s
     --log=%(outfile)s.log
     %(infile)s
+    '''
+
+    P.run()
+
+
+@follows(mkdir("plots.dir"),
+         unadjustedAssociation)
+@collate(unadjustedAssociation,
+         regex("gwas.dir/(.+)_assoc.assoc"),
+         r"plots.dir/WholeGenome_manhattan.png")
+def plotGenomeManhattan(infiles, outfile):
+    '''
+    Generate a manhattan plot across each chromosome
+    from the unadjusted analysis
+    '''
+
+    job_memory = "4G"
+
+    res_files = ",".join(infiles)
+
+    statement = '''
+    python /ifs/devel/projects/proj045/gwas_pipeline/assoc2plot.py
+    --plot-type=manhattan
+    --resolution=genome_wide
+    --save-path=%(outfile)s
+    --log=%(outfile)s.log
+    %(res_files)s
     '''
 
     P.run()
@@ -903,10 +1031,10 @@ def test_dissectGrmSingleFile(infiles, outfile):
 
 @follows(mkdir("dissect.dir"),
          mkdir("grm.dir"))
-@transform("*_list.tsv",
-           regex("(.+)_list.tsv"),
+@transform("data.dir/*_list.txt",
+           regex("data.dir/(.+)_list.txt"),
            r"grm.dir/\1.dat")
-def test_dissectGrmManyFiles(infiles, outfile):
+def test_dissectGrmManyFiles(infile, outfile):
     '''
     Test DISSECT for parallelised analysis
     Make a GRM, then do PCA
@@ -914,19 +1042,22 @@ def test_dissectGrmManyFiles(infiles, outfile):
     for GWAS
     '''
 
-    job_memory = "2G"
-    infiles = ",".join(infiles)
-    job_threads = 128
+    # get the sample list from PARAMS
+    # for chr10-9 + chr1, estimated memory usage was 4GB per process
+    job_memory = "3G"
+    job_threads = 256
     job_options = "-l h=!andromeda,h=!gandalf,h=!saruman"
     job_queue = "all.q"
     cluster_parallel_environment = " mpi "
+
+    out_pattern = ".".join(outfile.split(".")[:-1])
     statement = '''
     mpirun
     dissect
-    --bfile-list subsample_list.tsv
+    --bfile-list %(infile)s
     --make-grm
     --grm-join-method 1
-    --out grm.dir/subsample
+    --out %(out_pattern)s
     > dissect_test.log
     '''
 
@@ -951,8 +1082,8 @@ def dissectPCA(infile, outfile):
     mpirun
     dissect
     --pca
-    --grm grm.dir/subsample
-    --out grm.dir/subsample
+    --grm grm.dir/wholegenome
+    --out pca.dir/wholegenome
     --num-eval 20
     > dissect_test.log
     '''

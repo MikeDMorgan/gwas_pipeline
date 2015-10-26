@@ -1857,9 +1857,37 @@ class GWASResults(object):
     '''
 
     def __init__(self, assoc_file):
-        self.infile = assoc_file
-        # results is a pandas dataframe to operate on
-        self.results = self.get_results(assoc_file)
+        # if the assoc_file is a list of multiple files,
+        # then merge them into a single files
+        if type(assoc_file) == list and len(assoc_file) > 1:
+            E.info("multiple results files detected")
+            self.infiles = assoc_file
+            self.infile = None
+            self.results = self.parse_genome_wide(assoc_file)
+        else:
+            E.info("single results file detected")
+            self.infile = assoc_file
+            self.infiles = None
+            # results is a pandas dataframe to operate on
+            self.results = self.get_results(assoc_file)
+
+
+    def parse_genome_wide(self, association_files):
+        '''
+        Accept a list of results files, merge them together
+        and output as a single dataframe
+
+        Will this take a lot of memory??
+        '''
+
+        file0 = association_files.pop(0)
+        df = self.get_results(file0)
+
+        for afile in association_files:
+            _df = self.get_results(afile)
+            df.append(_df)
+
+        return df
 
     def get_results(self, association_file):
         '''
@@ -1943,9 +1971,16 @@ class GWASResults(object):
         R('''suppressPackageStartupMessages(library(ggplot2))''')
         r_df = py2ri.py2ri_pandasdataframe(self.results)
         R.assign("assoc.df", r_df)
-        R('''p <- ggplot(assoc.df, aes(x=BP, y=-log10P)) + geom_point() + '''
-          '''theme_bw() + labs(x="Chromosome position (bp)", '''
-          '''y="-log10 P-value")''')
+        if resolution == "chromosome":
+            R('''p <- ggplot(assoc.df, aes(x=BP, y=-log10P)) + geom_point() + '''
+              '''theme_bw() + labs(x="Chromosome position (bp)", '''
+              '''y="-log10 P-value")''')
+        elif resolution == "genome_wide":
+            R('''p <- ggplot(assoc.df, aes(x=BP, y=-log10P, colour=CHR)) + '''
+              '''geom_point() + '''
+              '''theme_bw() + labs(x="Chromosome position (bp)", '''
+              '''y="-log10 P-value")''')
+            
         R('''png("%s")''' % save_path)
         R('''print(p)''')
         R('''dev.off()''')

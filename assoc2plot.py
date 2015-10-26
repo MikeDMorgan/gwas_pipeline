@@ -68,13 +68,20 @@ def main(argv=None):
     # add common options (-h/--help, ...) and parse command line
     (options, args) = E.Start(parser, argv=argv)
 
+    # if the input is a list of files, split them
     infile = argv[-1]
+    infiles = infile.split(",")
+    if len(infiles) > 1:
+        results = gwas.GWASResults(assoc_file=infiles)
+    elif len(infiles) == 1:
+        results = gwas.GWASResults(assoc_file=infile)
+    else:
+        raise IOError("no input files detected, please specifiy association "
+                      "results files as the last command line argument")
 
-    results = gwas.GWASResults(assoc_file=infile)
     if options.plot_type == "manhattan":
         results.plotManhattan(resolution=options.resolution,
                               save_path=options.save_path)
-
     else:
         pass
 

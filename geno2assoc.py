@@ -330,7 +330,7 @@ def main(argv=None):
                         matrix_compress="gz",
                         random_seed=random.randint(0, 19999),
                         sample_update=None,
-                        memory="30G",
+                        memory="60G",
                         parallel=None)
 
     if not options.infile_pattern:
