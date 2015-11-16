@@ -57,8 +57,13 @@ def main(argv=None):
 
     parser.add_option("-p", "--plot-type", dest="plot_type", type="choice",
                       choices=["histogram", "barplot", "density",
-                               "boxplot", "scatter", "map"],
+                               "boxplot", "scatter", "map",
+                               "pca"],
                       help="the plot type to generate")
+
+    parser.add_option("--plot-n-pc", dest="n_pcs", type="int",
+                      help="The number of principal components to "
+                      "plot")
 
     parser.add_option("-g", "--group-by", dest="group_by", type="string",
                       help="column header to group observations by")
@@ -79,6 +84,14 @@ def main(argv=None):
                       help="a comma-separated list of axis labels. "
                       "The first 2 correspond to the X and Y-axis, "
                       "respectively, and the third is the plot title")
+
+    parser.add_option("--metadata-file", dest="meta_file", type="string",
+                      help="file containing metadata for annotating "
+                      "plots with. Use `--group-labels` to define table "
+                      "columns to use")
+
+    parser.add_option("--fam-file", dest="fam_file", type="string",
+                      help="Plink .fam file containing file IDs")
 
     parser.add_option("--xvar-labels", dest="xvar_labs", type="string",
                       help="a comma-separated list of variable X labels"
@@ -132,6 +145,9 @@ def main(argv=None):
                        header=0)
 
     if options.plot_type == "map":
+        df = pd.read_table(infile, sep="\t", index_col=options.indx,
+                           header=0)
+
         coords_df = pd.read_table(options.coordinates, sep="\t",
                                   header=0, index_col=options.indx)
         gwas.plotMapPhenotype(data=df,
@@ -144,7 +160,22 @@ def main(argv=None):
                               var_type=options.var_type,
                               xlabels=options.xvar_labs,
                               level=options.ref_val)
+
+    elif options.plot_type == "pca":
+        data = gwas.parseFlashPCA(pcs_file=infile,
+                                  fam_file=options.fam_file)
+
+        gwas.plotPCA(data=data,
+                     nPCs=options.n_pcs,
+                     point_labels=options.group_labs,
+                     save_path=options.outfile,
+                     headers=False,
+                     metadata=options.meta_file,
+                     multiplot=True)
     else:
+        df = pd.read_table(infile, sep="\t", index_col=options.indx,
+                           header=0)
+
         gwas.plotPhenotype(data=df,
                            plot_type=options.plot_type,
                            x=options.x_col,

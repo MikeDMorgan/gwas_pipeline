@@ -80,11 +80,18 @@ def main(argv=None):
                       "results files as the last command line argument")
 
     if options.plot_type == "manhattan":
-        results.plotManhattan(resolution=options.resolution,
-                              save_path=options.save_path)
+        df = results.plotManhattan(resolution=options.resolution,
+                                   save_path=options.save_path)
+    elif options.plot_type == "qqplot":
+        results.plotQQ(save_path=options.save_path,
+                       resolution=options.resolution)
     else:
         pass
 
+    if df.any():
+        df.to_csv(options.stdout, sep="\t")
+    else:
+        pass
 
     # write footer and output benchmark information.
     E.Stop()
