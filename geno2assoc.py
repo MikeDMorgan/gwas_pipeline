@@ -52,7 +52,7 @@ def main(argv=None):
                             usage=globals()["__doc__"])
 
     parser.add_option("--program", dest="program", type="choice",
-                      choices=["plink2", "gcta"],
+                      choices=["plink2", "gcta", "plinkdev"],
                       help="program to execute genome-wide analysis")
 
     parser.add_option("--input-file-pattern", dest="infile_pattern", type="string",
@@ -353,6 +353,10 @@ def main(argv=None):
         gwas_object = gwas.Plink2(files=geno_files)
         gwas_object.program_call(infiles=geno_files,
                                  outfile=options.out_pattern)
+    elif options.program == "plinkdev":
+        gwas_object = gwas.PlinkDev(files=geno_files)
+        gwas_object.program_call(infiles=geno_files,
+                                 outfile=options.out_pattern)
     elif options.program == "gcta":
         gwas_object = gwas.GCTA(files=geno_files)
         gwas_object.program_call(infiles=geno_files,
@@ -369,8 +373,8 @@ def main(argv=None):
     for fkey in filter_dict:
         filt_key = fkey.lstrip("filt_")
         filter_value = filter_dict[fkey]
-        gwas_object.filter_genotypes(filter_type=filt_key,
-                                     filter_value=filter_value)
+        gwas_object.apply_filters(filter_type=filt_key,
+                                  filter_value=filter_value)
 
     # handle summary statistics
     if options.method == "summary":

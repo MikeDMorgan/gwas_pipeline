@@ -386,7 +386,7 @@ class GCTA(GWASProgram):
 
         self._run_tasks(pca=n_pcs)
 
-    def filter_genotypes(self, filter_type, filter_value):
+    def apply_filters(self, filter_type, filter_value):
         '''
         * chromosome - exclude all variants not on the specified chromosome(s).
           [str/list]
@@ -566,7 +566,8 @@ class GCTA(GWASProgram):
                                        "fixed_cor": " --reml-bivar %s --reml-bivar-lrt-rg %s "},
                     "lmm": {"standard": " --mlma ",
                             "loco": " --mlma-loco ",
-                            "covar": " --mlma-no-adj-covar "}}
+                            "covar": " --mlma-no-adj-covar "},
+                    "remove_relations": {"cutoff": " --grm-cutoff %s "}}
 
         for task, value in kwargs.iteritems():
             # check for PCA first as it is not nested in task_map
@@ -739,7 +740,7 @@ class Plink2(GWASProgram):
             pass
 
         self.statement["program"] = " ".join(statement)
-
+ 
     def hamming_matrix(self, shape, compression, options):
         '''
         Calculate genomic pair-wise distance matrix between
@@ -866,7 +867,7 @@ class Plink2(GWASProgram):
 
         self.statement["matrix"] = state       
 
-    def filter_genotypes(self, filter_type, filter_value):
+    def apply_filters(self, filter_type, filter_value):
         '''
         arguments supported by this function.
 
@@ -924,6 +925,12 @@ class Plink2(GWASProgram):
             self._construct_filters(snp_bp_range=filter_value)
         elif filter_type == "conditional_snp":
             self._construct_filters(conditional_snp=filter_value)
+        elif filter_type == "keep":
+            self._construct_filters(keep=filter_value)
+        elif filter_type == "remove":
+            self._construct_filters(remove=filter_value)
+        elif filter_type == "ignore_indels":
+            self._construct_filters(ignore_indels=filter_value)
 
     def _build_multiple_file_input(self, infiles, file_format):
         '''
@@ -950,6 +957,8 @@ class Plink2(GWASProgram):
             statement = " --vcf %s " % infiles.vcf_file
         elif file_format == "bcf":
             statement = " --bcf %s " % infiles.vcf_file
+        elif file_format == "GRM_binary":
+            statement = " --grm-bin %s " % infiles.name
         else:
             raise AttributeError("file format is not defined.  Please "
                                  "define the input file formats when "
@@ -972,6 +981,8 @@ class Plink2(GWASProgram):
             statement = " --data %s" % infiles.name
         elif file_format == "GRM_plink":
             statement = " --grm.bin  %s " %infiles.name
+        elif file_format == "GRM_binary":
+            statement = " --grm-bin %s " % infiles.name
         else:
             raise AttributeError("file format is not defined or recognised."
                                  "Please define the input corectly when "
@@ -1169,7 +1180,7 @@ class Plink2(GWASProgram):
             try:
                 assert filter_map[each]
                 # check for data type <- behaviour is type dependent
-                if type(filter_dict[each]) == 'bool':
+                if type(filter_dict[each]) == bool:
                     filters.append(filter_map[each])
                 # handle multiple arguments in string format
                 elif len(filter_dict[each].split(",")) > 1:
@@ -1222,6 +1233,10 @@ class Plink2(GWASProgram):
         * merge_mode - handling of missing values and overwriting values
         * find_duplicates - find and output duplicate variants based on bp position,
           or variant ID.  Useful to output for the --exclude filtering flag.
+        * remove_relations - remove one of a pair of individuals with IBS >=
+          a threshold.  Recommended minimum is 3rd cousins (IBS >= 0.03125).
+        * check_gender - check imputed gender from non-pseudoautosomal X
+          chromsome genotypes against self-reported gender
         '''
 
         statement = []
@@ -1268,6 +1283,8 @@ class Plink2(GWASProgram):
                     "find_duplicates": {"same_ref": " --list-duplicate-vars require-same-ref ",
                                         "id_match": " --list-duplicate-vars ids-only ",
                                         "suppress_first": " --list-duplicate-vars suppress-first"},
+                    "remove_relations": {"cutoff": " --rel-cutoff %s "},
+                    "check_gender": " --check-sex ",
                     "pca": " --pca %s "}
 
 
@@ -1280,6 +1297,8 @@ class Plink2(GWASProgram):
                 except TypeError:
                     statement.append(task_map[task])
                 statement.append
+            elif task == "check_gender":
+                statement.append(task_map[task])
             elif task != "parameter":
                 try:
                     # sub_task is a nested dictionary
@@ -1662,7 +1681,7 @@ class Plink2(GWASProgram):
           with deviation from expected proportions
         * ibd - calculate the genetic relationship of individuals to
           infer relatedness between individuals, threshold on given
-          degree of relatedness, e.g. IBD > 0.0625, 3rd cousins
+          degree of relatedness, e.g. IBD > 0.03125, 3rd cousins
         * genetic_gender - estimate the gender of an individual
           from the X chromosome genotypes - correlate with reported
           gender and output discrepancies
@@ -1758,7 +1777,7 @@ class Plink2(GWASProgram):
                 sub_task = qc_dict[task]
                 try:
                     state.append(sub_task[value] % parameter)
-                except ValueError:
+                except TypeError:
                     state.append(sub_task[value])
             except KeyError:
                 raise AttributeError("Task not found, please see "
@@ -1815,7 +1834,9 @@ class Plink2(GWASProgram):
         else:
             pass
 
-        if memory != "60G":
+        if not memory:
+            pass
+        elif memory != "60G":
             memory = int(memory.strip("G")) * 1000
             statement.append(" --memory %i " % memory)
         else:
@@ -1825,29 +1846,55 @@ class Plink2(GWASProgram):
         # outfile needs to be complete path for Plink to save
         # results properly - check if it starts with '/',
         # if so is already a full path
-        if os.path.isabs(outfile):
-            statement.append(" --out %s " % outfile)
-        else:
-            outpath = "/".join([os.getcwd(), outfile])
-            statement.append(" --out %s " % outpath)
+        if not parallel:
+            if os.path.isabs(outfile):
+                statement.append(" --out %s " % outfile)
+            else:
+                outpath = "/".join([os.getcwd(), outfile])
+                statement.append(" --out %s " % outpath)
 
-        # parallelisation only really applies to GRM calculation
-        # at the moment
-        if parallel:
+            os.system(" ".join(statement))
+        else:
+            # parallelisation only really applies to GRM calculation
+            # at the moment <- need to generalise
+            # if parallelisation is used, invoke temp files
+            # then agglomerate files
+
             statements = []
-            cat_state = [" cat "]
+
+            if os.path.isabs(outfile):
+                outpath = outfile
+            else:
+                outpath = "/".join([os.getcwd(), outfile])              
 
             for i in range(1, parallel+1):
                 p_state = statement[:] # copy list, assigning just makes a pointer
                 p_state.append(" --parallel %i %i " % (i, parallel))
+                p_state.append(" --out %s.%i " % (outpath, i))
                 statements.append(" ".join(p_state))
-                cat_state.append(" %s.grm.bin.%i " % (outpath, i))
-            cat_state.append(" > %s.grm.N.bin " % outpath)
-            statements.append(" ".join(cat_state))
+
             os.system(";".join(statements))
-        else:
-            os.system(" ".join(statement))
-        
+
+
+class PlinkDev(Plink2):
+    '''
+    Run various Plink functions and analysis, including file processing, GRM
+    calculation, PCA and other GWA tasks
+
+    Require Plink v1.9_devel to be in the users PATH variable as ``plinkdev`` to
+    distinguish it from Plink v1.07 and v1.9.
+    Currently uses Nov 11 development build.
+    '''
+
+    def __init__(self, files, options=None,
+                 settings=None, design=None):
+        self.infiles = files
+        self.options = options
+        self.settings = settings
+        self.design = design
+        self.executable = "plinkdev"
+        self.statement = {}
+        self.filters = []
 
 
 class GWASResults(object):
@@ -1885,7 +1932,10 @@ class GWASResults(object):
 
         for afile in association_files:
             _df = self.get_results(afile)
-            df.append(_df)
+            df = df.append(_df)
+
+        df["CHR"] = df["CHR"].astype(np.int64)
+        df.sort(columns=["CHR", "BP"], inplace=True)
 
         return df
 
@@ -1951,7 +2001,8 @@ class GWASResults(object):
 
         return results_frame
 
-    def plotManhattan(self, save_path, resolution="chromosome"):
+    def plotManhattan(self, save_path, resolution="chromosome",
+                      write_merged=True):
         '''
         Generate a basic manhattan plot of the association results
         Just deal with chromosome-by-chromosome for now.
@@ -1961,29 +2012,35 @@ class GWASResults(object):
         # need to calculate -log10P values separately
         self.results["log10P"] = np.log(self.results["P"])
 
-        # manplot = ggplot(self.results, aes(x="BP",
-        #                                    y="-log10P")) + \
-        #     geom_point() + xlab("Chromosome position (bp)") + \
-        #     ylab("-log10 P-value")
-
         # or using rpy2
         py2ri.activate()
         R('''suppressPackageStartupMessages(library(ggplot2))''')
+        R('''suppressPackageStartupMessages(library(scales))''')
+        R('''suppressPackageStartupMessages(library(qqman))''')
         r_df = py2ri.py2ri_pandasdataframe(self.results)
         R.assign("assoc.df", r_df)
         if resolution == "chromosome":
             R('''p <- ggplot(assoc.df, aes(x=BP, y=-log10P)) + geom_point() + '''
               '''theme_bw() + labs(x="Chromosome position (bp)", '''
               '''y="-log10 P-value")''')
+            R('''png("%s")''' % save_path)
+            R('''print(p)''')
+            R('''dev.off()''')
+
         elif resolution == "genome_wide":
-            R('''p <- ggplot(assoc.df, aes(x=BP, y=-log10P, colour=CHR)) + '''
-              '''geom_point() + '''
-              '''theme_bw() + labs(x="Chromosome position (bp)", '''
-              '''y="-log10 P-value")''')
+            R('''png("%s", width=720, height=540)''' % save_path)
+            R('''p <- manhattan(assoc.df, main="Manhattan plot",'''
+              '''ylim=c(0, 50), cex=0.9, suggestiveline=T,'''
+              '''genomewideline=-log10(5e-8), chrlabs=c(1:22), '''
+              '''col=c("#8B1A1A","#8470FF"))''')
+            R('''print(p)''')
+            R('''dev.off()''')
+
+        if write_merged:
+            return self.results
+        else:
+            return False
             
-        R('''png("%s")''' % save_path)
-        R('''print(p)''')
-        R('''dev.off()''')
 
     def plotQQ(self, save_path, resolution="chromosome"):
         '''
@@ -1991,7 +2048,18 @@ class GWASResults(object):
         test statistics
         '''
 
-        pass
+        self.results["log10P"] = np.log(self.results["P"])
+
+        py2ri.activate()
+        R('''suppressPackageStartupMessages(library(ggplot2))''')
+        R('''suppressPackageStartupMessages(library(scales))''')
+        R('''suppressPackageStartupMessages(library(qqman))''')
+        r_df = py2ri.py2ri_pandasdataframe(self.results)
+        R.assign("assoc.df", r_df)
+        R('''png("%s", width=720, height=540)''' % save_path)
+        R('''qq(assoc.df$P)''')
+        R('''dev.off()''')
+
 
 
 ##########################################################
@@ -2022,7 +2090,6 @@ def plotMapPhenotype(data, coords, coord_id_col, lat_col,
         var.sort()
         # recode the variables according to the input labels
         xlabs = xlabels.split(",")
-        print xlabs, var
         lbls = [str(xlabs[ix]) for ix in range(len(var))]
         for xv in range(len(var)):
             nvar[nvar == var[xv]] = lbls[xv]
@@ -2073,7 +2140,6 @@ def plotMapPhenotype(data, coords, coord_id_col, lat_col,
           '''fill=c("#000000", "#FF0000"))''' % locals())
         R('''dev.off()''')
     else:
-        R('''print(pheno.df$cat_var[pheno.df$cat_var == "nan"])''')
         R('''png("%(save_path)s", width=540, height=540, res=90)''' % locals())
         R('''map(uk_map)''')
 
@@ -2341,6 +2407,100 @@ def plotPhenotype(data, plot_type, x, y=None, group=None,
 
     R('''png("%(save_path)s")''' % locals())
     R('''print(p)''')
+    R('''dev.off()''')
+
+
+def parseFlashPCA(pcs_file, fam_file):
+    '''
+    Parse the principal components file from FlashPCA
+    and match with individual identifiers.  This
+    assumes the output order of FlashPCA is the same
+    as the input order in the .fam file
+    '''
+
+    pc_df = pd.read_table(pcs_file, sep="\t",
+                          header=None, index_col=None)
+    # add a header to the pc_df file
+    headers = ["PC%i" % m for n, m in enumerate(pc_df.columns)]
+
+    pc_df.columns = headers
+
+    fam_df = pd.read_table(fam_file, sep="\t",
+                           header=None, index_col=None)
+    
+    fam_df.columns = ["FID", "IID", "PAR", "MAT", "GENDER",
+                      "PHENO"]
+    pc_df[["FID", "IID"]] = fam_df.iloc[:, :2]
+
+    return pc_df
+
+
+def plotPCA(data, nPCs, point_labels, save_path,
+            headers, metadata=None, multiplot=False):
+    '''
+    Plot N principal components from a PCA either as
+    a single plot of the first 2 PCs, a grid plot of
+    N PCs.
+
+    Arguments
+    ---------
+    data: string
+      PATH to file containing principal components
+
+    nPCs: int
+      number of principal components to plot.  If this
+      value is > 2, then multiplot will be enabled
+      automatically
+
+    point_labels: vector
+      a vector of labels of length correpsonding to
+      the number of rows in the data file.  These are
+      used to colour the points in the plot with relevant
+      metadata.  Alternatively, can be the column header
+      in the metadata file that corresponds to annotations
+
+    save_path: string
+      An absolute PATH to save the plot(s) to
+
+    headers: boolean
+      whether the `data` file contains header delineating the
+      columns
+
+    metadata: string
+      file containing metadata to annotate plot with, includes
+      point_labels data
+
+    multiplot: boolean
+      If True, generate a grid of scatter plots with successive
+      PCs plotted against each other
+
+    Returns
+    -------
+      None
+    '''
+
+    py2ri.activate()
+    if metadata:
+        meta_df = pd.read_table(metadata, sep="\t", header=0,
+                                index_col=None)
+    else:
+        pass
+
+    labels = meta_df[["FID", "IID", point_labels]]
+    merged = pd.merge(data, labels, left_on="FID",
+                      right_on="FID", how='inner')
+
+    # TO DO: enable multiplotting of many PCs
+    r_df = py2ri.py2ri_pandasdataframe(merged)
+    R.assign("pc.df", r_df)
+    R('''suppressPackageStartupMessages(library(ggplot2))''')
+    R('''pc.df[["%(point_labels)s"]] <- as.factor(pc.df[["%(point_labels)s"]])''' % locals())
+
+    R('''p_pcs <- ggplot(pc.df, aes(x=PC1, y=PC2, colour=%s)) + '''
+      '''geom_point(size=1) + theme_bw() + '''
+      '''labs(x="PC1", y="PC2", title="PC1 vs. PC2 LD trimmed genotypes")''' % point_labels)
+    R('''png("%s")''' % save_path)
+    R('''print(p_pcs)''')
     R('''dev.off()''')
 
 
@@ -2753,7 +2913,9 @@ def findDuplicateVariants(bim_file, take_last=False):
         # triallelic variant, otherwise its probably a duplicate
         # or overlaping INDEL and SNV
         var_lens = groups["VAR"].apply(len)
-        if np.mean(var_lens) > 1:
+        if groups.shape[0] == 1:
+            pass
+        elif np.mean(var_lens) > 1:
             # probably overlapping variants, exclude, but report
             # separately
             over_vars = groups["SNP"].values.tolist()
@@ -2775,7 +2937,8 @@ def findDuplicateVariants(bim_file, take_last=False):
     
     return dups_alleles, tri_alleles, overlap_vars
 
-def flagExcessHets(hets_file):
+
+def flagExcessHets(hets_file, plot=True, plot_path=None):
     '''
     Take output from Plink 1.9 --het command
     calculate heterozygosity rate and flag individuals
@@ -2814,4 +2977,199 @@ def flagExcessHets(hets_file):
     lo_hets["exclude"] = "low_heterozygosity"
     all_flags = lo_hets.append(hi_hets)
 
+    if plot:
+        E.info("plotting heterozygosity rate distribution")
+        py2ri.activate()
+        r_df = py2ri.py2ri_pandasdataframe(het_df)
+        R.assign("het.df", r_df)
+        R('''suppressPackageStartupMessages(library(ggplot2))''')
+        R('''p <- ggplot(het.df, aes(het_rate)) + '''
+          '''geom_histogram() + '''
+          '''labs(title="Distribution of heterozygosity rate") + '''
+          '''theme_bw() + '''
+          '''geom_vline(xintercept=c(%0.3f, %0.3f), '''
+          '''linetype=2, col="#838B83")''' % (lower, upper))
+        R('''png("%s/het_rate-hist.png")''' % plot_path)
+        R('''print(p)''')
+        R('''dev.off()''')        
+        
+
     return all_flags
+
+
+def flagGender(gender_file, plot=True, plot_path=None):
+    '''
+    Parse the .sexcheck output report from Plink
+    --sex-check and flag gender discordant individuals.
+
+    Arguments
+    ---------
+    gender_file: string
+      the .sexcheck output report file from Plink --sex-check
+
+    plot: boolean
+      generate a histogram of F values distributions showing male and
+      female clusters, split by reported gender
+
+    plot_path: string
+      PATH to save F coefficient histogram
+
+    Returns
+    -------
+    discords: pandas.Core.DataFrame
+      a pandas dataframe of individuals that are gender discordant
+    '''
+
+    gender_df = pd.read_table(gender_file, header=0,
+                              index_col=None, sep=None)
+    genders = lambda x: "male" if x == 1 else "female"
+    gender_df["GENDER"] = gender_df["PEDSEX"].apply(genders)
+
+    E.info("checking individuals for discordance")
+    discords = gender_df[gender_df["STATUS"] != "OK"]
+    discords.drop(labels=["PEDSEX", "SNPSEX", "STATUS", "F",
+                          "GENDER"],
+                  axis=1, inplace=True)
+
+    E.info("%i individuals with discordant gender" % len(discords))
+
+    if plot:
+        E.info("plotting F gender coefficient distributions")
+        py2ri.activate()
+        r_df = py2ri.py2ri_pandasdataframe(gender_df)
+        R.assign("gender.df", r_df)
+        R('''suppressPackageStartupMessages(library(ggplot2))''')
+        R('''p <- ggplot(gender.df, aes(F, fill=GENDER)) + '''
+          '''geom_histogram() + '''
+          '''labs(title="F coefficient distributions for gender") + '''
+          '''theme_bw() + facet_grid(. ~ GENDER)''')
+        R('''png("%s/gender_check-hist.png")''' % plot_path)
+        R('''print(p)''')
+        R('''dev.off()''')        
+
+    else:
+        pass
+
+    return discords
+
+
+def flagRelated(ibd_file, chunk_size=None, 
+                threshold=0.03125, plot=True,
+                plotting_path=None):
+    '''
+    Use IBS estimates to find pairs of related individuals
+    above a threshold.
+
+    This will also flag up the number of duplicated/monozygotic
+    twin pairs (matrix diagonals).
+
+    Arguments
+    ---------
+    ibd_file: string
+      file containing IBS estimates between pairs from Plink
+      or GCTA.
+
+    chunk_size: int
+      the file chunk size to read in at a time, should correspond
+      to the number of individuals.  If not set, the whole file
+      is read in.  Not recommend for large (>2GB) files.
+
+    threshold: float
+      IBS threshold, above which individuals will be flagged
+      as related. Default is 3rd cousins.
+
+    plot: boolean
+      generate a histogram of the distribution of IBS values.
+      Default = True
+
+    plotting_path: string
+      PATH to plot histogram to
+
+    Returns
+    -------
+    flagged: pandas.Core.DataFrame
+      dataframe of individuals to remove, with the estimated
+      relationship to another individual.
+    '''
+
+    related_list = []
+
+    if ibd_file.endswith("gz"):
+        comp = "gzip"
+    else:
+        pass
+
+    if chunk_size:
+        # read in and operate on chunks
+        df_iter = pd.read_table(ibd_file, header=0, index_col=None,
+                                sep="\t", compression=comp,
+                                chunksize=chunk_size)
+
+        for chunk in df_iter:
+            related = chunk["PI_HAT"]
+    else:
+        pass
+
+
+def flagInbred(inbred_file, inbreeding_coefficient,
+               ibc_threshold=0.05,
+               plot=True, plot_path=None):
+    '''
+    Use Plink or GCTA's estimate of F, inbreeding coefficient
+    to flag individuals that are highly inbred.
+
+    Arguments
+    ---------
+    inbred_file: string
+      file containing estimates of F
+
+    inbreeding_coefficient: string
+      coefficient to use to identify inbred individuals.  This name
+      should correspond to one of the columns in `inbred_file`.
+
+    ibc_threshold: float
+      the threshold above which individuals will be flagged as inbred
+
+    plot: boolean
+      generate a histogram of the distribution of F coefficients
+
+    plotting_path: string
+      PATH to directoru for plotting F coefficient distribution
+
+    Returns
+    -------
+    inbreds: padas.Core.DataFrame
+      dataframe of inbred individuals to exclude from analysis
+    '''
+
+    inbreed_df = pd.read_table(inbred_file, header=0,
+                               index_col=None, sep="\t")
+
+    E.info("Identifing individuals with inbreeding coefficient"
+           " greater than %0.3f" % ibc_threshold)
+
+    inbreds = inbreed_df[inbreed_df[inbreeding_coefficient] > ibc_threshold]
+    inbreds = inbreds[["FID", "IID"]]
+
+    E.info("%i individuals with high inbreeding "
+           "coefficient" % len(inbreds))
+
+    if plot:
+        E.info("plotting F coefficient distributions")
+        py2ri.activate()
+        r_df = py2ri.py2ri_pandasdataframe(inbreed_df)
+        R.assign("inbreed.df", r_df)
+        R('''suppressPackageStartupMessages(library(ggplot2))''')
+        R('''p <- ggplot(inbreed.df, aes(%(inbreeding_coefficient)s)) + '''
+          '''geom_histogram(binwidth=0.01) + '''
+          '''labs(title="Inbreeding coefficient, %(inbreeding_coefficient)s,'''
+          '''distribution") + theme_bw() + '''
+          '''geom_vline(xintercept=%(ibc_threshold)0.3f, '''
+          '''linetype=4, colour="#838B83")''' % locals())
+        R('''png("%s/inbreeding-hist.png")''' % plot_path)
+        R('''print(p)''')
+        R('''dev.off()''')        
+    else:
+        pass
+
+    return inbreds

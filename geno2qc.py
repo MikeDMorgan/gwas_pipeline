@@ -52,7 +52,7 @@ def main(argv=None):
                             usage=globals()["__doc__"])
 
     parser.add_option("--program", dest="program", type="choice",
-                      choices=["plink2", "gcta"],
+                      choices=["plink2", "gcta", "plinkdev"],
                       help="program to execute genome-wide analysis")
 
     parser.add_option("--input-file-pattern", dest="infile_pattern", type="string",
@@ -78,8 +78,14 @@ def main(argv=None):
                       "association model")
 
     parser.add_option("--method", dest="method", type="choice",
-                      choices=["ld_prune", "summary", "flag_hets"],
+                      choices=["ld_prune", "summary", "flag_hets",
+                               "remove_relations", "check_gender",
+                               "IBD"],
                       help="method to apply to genome-wide data")
+
+    parser.add_option("--IBD-parameter", dest="ibd_param", type="choice",
+                      choices=["norm", "relatives", "full"], help="param "
+                      "to pass to IBD calculations")
 
     parser.add_option("--principal-components", dest="num_pcs", type="int",
                       help="the number of principal components to output")
@@ -135,8 +141,8 @@ def main(argv=None):
 
     parser.add_option("--summary-method", dest="summary_method", type="choice",
                       choices=["allele_frequency", "missing_data", "hardy_weinberg",
-                               "mendel_errors", "inbreeding", "gender_checker",
-                               "wrights_fst"],
+                               "mendel_errors", "inbreeding", "inbreeding_coef", 
+                               "gender_checker", "wrights_fst"],
                       help="summary statistics to calculate")
 
     parser.add_option("--summary-parameter", dest="sum_param", type="string",
@@ -184,6 +190,13 @@ def main(argv=None):
     parser.add_option("--enforce-gender", dest="filt_enforce_sex", type="string",
                       help="only include individuals with non-missing gender "
                       "information")
+
+    parser.add_option("--keep-individuals", dest="filt_keep", type="string",
+                      help="a file containing individuals IDs to keep, "
+                      "one per row")
+
+    parser.add_option("--remove-individuals", dest="filt_remove", type="string",
+                      help="a file of individual IDs to remove, one per row")
 
     parser.add_option("--subset-filter", dest="filt_subset_filter", type="choice",
                       choices=["cases", "controls", "males", "females",
@@ -270,6 +283,12 @@ def main(argv=None):
     parser.add_option("--threshold", dest="threshold", type="string",
                       help="threshold on which to filter results")
 
+    parser.add_option("--parallel", dest="parallel", type="int",
+                      help="number of jobs to split task into")
+
+    parser.add_option("--memory", dest="memory", type="string",
+                      help="amount of memory to reserve for the task")
+
     # add common options (-h/--help, ...) and parse command line
     (options, args) = E.Start(parser, argv=argv)
 
@@ -279,7 +298,9 @@ def main(argv=None):
                         matrix_options=None,
                         matrix_compress="gz",
                         kb=False,
-                        random_seed=random.randint(0, 19999))
+                        random_seed=random.randint(0, 19999),
+                        memory="60G",
+                        parallel=None)
 
     if not options.infile_pattern:
         infiles = (argv[-1]).split(",")
@@ -301,6 +322,11 @@ def main(argv=None):
         gwas_object = gwas.Plink2(files=geno_files)
         gwas_object.program_call(infiles=geno_files,
                                  outfile=options.out_pattern)
+    elif options.program == "plinkdev":
+        gwas_object = gwas.PlinkDev(files=geno_files)
+        gwas_object.program_call(infiles=geno_files,
+                                 outfile=options.out_pattern)
+
     elif options.program == "gcta":
         gwas_object = gwas.GCTA(files=geno_files)
         gwas_object.program_call(infiles=geno_files,
@@ -313,12 +339,12 @@ def main(argv=None):
     filter_keys = [fx for fx in opt_dict.keys() if re.search("filt", fx)]
     filter_dict = {k: options.__dict__[k] for k in filter_keys if opt_dict[k]}
 
-    # iteratively add genotype filters to GWASProgram object
+    # iteratively add all filters to GWASProgram object
     for fkey in filter_dict:
-        filt_key = fkey.lstrip("filt_")
+        filt_key = fkey.replace("filt_", "")
         filter_value = filter_dict[fkey]
-        gwas_object.filter_genotypes(filter_type=filt_key,
-                                     filter_value=filter_value)
+        gwas_object.apply_filters(filter_type=filt_key,
+                                  filter_value=filter_value)
 
     # handle summary statistics
     if options.method == "ld_prune":
@@ -327,6 +353,10 @@ def main(argv=None):
                                 window=options.window_size,
                                 step=options.step,
                                 threshold=options.threshold)
+    elif options.method == "IBD":
+        # use sum param to pass arguments to ibd estiamte
+        # these are norm, full or relatitves
+        gwas_object._qc_methods(ibd=options.ibd_param)
     elif options.method == "summary":
         if options.summary_method == "allele_frequency":
             gwas_object._output_statistics(allele_frequency=options.sum_param)
@@ -338,19 +368,27 @@ def main(argv=None):
             gwas_object._output_statistics(mendel_errors=options.sum_param)
         elif options.summary_method == "inbreeding":
             gwas_object._output_statistics(inbreeding=options.sum_param)
+        elif options.summary_method == "inbreeding_coef":
+            gwas_object._output_statistics(inbreeding_coef=options.sum_param)
         elif options.summary_method == "gender_checker":
             gwas_object._output_statistics(gender_checker=options.sum_param)
         elif options.summary_method == "wrights_fst":
             gwas_object._output_statistics(wrights_fst=options.sum_param)
         else:
             pass
-
+    elif options.method == "remove_relations":
+        gwas_object._run_tasks(remove_relations="cutoff",
+                               parameter=options.threshold)
+    elif options.method == "check_gender":
+        gwas_object._run_tasks(check_gender="")
     else:
         pass
 
     gwas_object.build_statement(infiles=geno_files,
                                 outfile=options.out_pattern,
-                                threads=options.threads)
+                                threads=options.threads,
+                                memory=options.memory,
+                                parallel=options.parallel)
 
     # write footer and output benchmark information.
     E.Stop()
