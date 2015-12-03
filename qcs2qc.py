@@ -93,6 +93,10 @@ def main(argv=None):
                       help="file from heterozygote analysis containing observed "
                       "homozygosity and F coefficients")
 
+    parser.add_option("--auxillary-file", dest="aux_file", type="string",
+                      help="a file of IIDs and FIDs for individuals that are "
+                      "to be removed from analysis, unrelated to QC")
+
     parser.add_option("--plotting-path", dest="plot_path", type="string",
                       help="PATH to save any plots to")
 
@@ -110,7 +114,12 @@ def main(argv=None):
         flags.to_csv(options.stdout, index=None, sep="\t")
 
     elif options.task == "merge_exclusions":
-        pass
+        exclusions = gwas.mergeQcExclusions(hets_file=options.hets_file,
+                                            inbred_file=options.inbreed_file,
+                                            related_file=options.relations,
+                                            gender_file=options.gender_check,
+                                            mask_file=options.aux_file)
+        exclusions.to_csv(options.stdout, index=None, sep="\t")
     elif options.task == "find_inbreds":
         inbreds = gwas.flagInbred(inbred_file=options.inbreed_file,
                                   inbreeding_coefficient=options.inbred_coeff,
@@ -122,13 +131,16 @@ def main(argv=None):
         # the input file is likely to be huge! Ergo, read the file in chunks
         # calculate any related individuals and store them, store
         # an array of IBD values for plotting, drop the rest
-        pass
+        relate = gwas.flagRelated(ibd_file=options.relations,
+                                  chunk_size=500000,
+                                  threshold=options.ibs_cutoff,
+                                  plot=True,
+                                  plotting_path=options.plot_path)
     elif options.task == "discordant_gender":
         sex_discord = gwas.flagGender(gender_file=options.gender_check,
                                       plot=True,
                                       plot_path=options.plot_path)
         sex_discord.to_csv(options.stdout, index=None, sep="\t")
-        pass
     else:
         pass
 

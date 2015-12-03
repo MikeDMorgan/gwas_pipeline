@@ -60,7 +60,7 @@ def main(argv=None):
 
     parser.add_option("--task", dest="task", type="choice",
                       choices=["mafs", "penetrance",
-                               "detect_duplicates"],
+                               "detect_duplicates", "allele_diff"],
                       help="task to perform")
 
     parser.add_option("--ped-file", dest="ped_file", type="string",
@@ -73,6 +73,16 @@ def main(argv=None):
                       help="text file containing populations minor "
                       "allele frequencies of variants.  One row per "
                       "variant with ID MAF")
+
+    parser.add_option("--groups-file", dest="group_file", type="string",
+                      help="file containing group labels for individuals "
+                      "in the provided ped file")
+
+    parser.add_option("--ref-label", dest="ref_label", type="string",
+                      help="group label to be used as the reference case")
+
+    parser.add_option("--test-label", dest="test_label", type="string",
+                      help="group label to be used as the test case")
 
     parser.add_option("--subset", dest="subset", type="choice",
                       choices=["cases", "gender"], help="subset the "
@@ -110,6 +120,15 @@ def main(argv=None):
         pens.to_csv(options.stdout, sep="\t", index_label="SNP")
         summary.to_csv("/".join([os.getcwd(), "penetrance_summary.txt"]),
                        sep="\t", index_label="SNP")
+
+    elif options.task == "allele_diff":
+        allele_diffs = gwas.calcMaxAlleleFreqDiff(ped_file=options.ped_file,
+                                                  map_file=options.map_file,
+                                                  group_file=options.group_file,
+                                                  test=options.test_label,
+                                                  ref=options.ref_label)
+
+        allele_diffs.to_csv(options.stdout, sep="\t")
 
     elif options.task == "detect_duplicates":
         # find variants with duplicated position and shared reference

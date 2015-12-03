@@ -57,7 +57,10 @@ def main(argv=None):
     parser.add_option("-t", "--test", dest="test", type="string",
                       help="supply help")
 
-    parser.add_option("--task", dest="task", type="string",
+    parser.add_option("--task", dest="task", type="choice",
+                      choices=["set_factors", "dichotimise_phenotype",
+                               "plink_format", "select_ethnicity",
+                               "merge_covariates"],
                       help="task to execute on phenotype file(s)")
 
     parser.add_option("--R-script", dest="r_script", type="string",
@@ -81,6 +84,10 @@ def main(argv=None):
 
     parser.add_option("--ethnicity-label", dest="ethnic", type="string",
                       help="ethnicity label to select samples on")
+
+    parser.add_option("--covariate-file", dest="covar_file", type="string",
+                      help="a comma-separated list of files to be merged, or "
+                      "a single file")
 
     # add common options (-h/--help, ...) and parse command line
     (options, args) = E.Start(parser, argv=argv)
@@ -155,7 +162,23 @@ def main(argv=None):
         filter_df.index = filter_df["FID"]
         filter_df.drop(labels="FID", axis=1, inplace=True)
         filter_df.to_csv(options.stdout, sep="\t", index_col=None)
-        
+    elif options.task == "merge_covariates":
+        if len(options.covar_file.split(",")) > 1:
+            filelist = options.covar_file.split(",")
+            df = pd.read_table(filelist.pop(0), sep="\t",
+                               index_col=None, header=0)
+            for fle in filelist:
+                _df = pd.read_table(fle, sep="\t", header=0,
+                                    index_col=None)
+                df = pd.merge(left=df, right=_df,
+                              on=["FID", "IID"],
+                              how='inner')
+
+            df.to_csv(options.stdout, index_col=None,
+                      index=False, sep="\t")
+        else:
+            E.warn("only a single covariates file provided."
+                   "No merging possible, exiting")
     else:
         pass
         

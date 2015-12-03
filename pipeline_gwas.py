@@ -157,7 +157,8 @@ def connect():
 # for the report and non-genetic analyses
 @follows(mkdir("phenotypes.dir"),
          mkdir("%s" % PARAMS['plots_dir']))
-@transform("%s/*.tab" % PARAMS['data_dir'],
+@transform("%s/%s*.tab" % (PARAMS['data_dir'],
+                           PARAMS['data_prefix']),
            regex("%s/(.+).tab" % PARAMS['data_dir']),
            r"phenotypes.dir/\1.tsv")
 def formatPhenotypeData(infiles, outfile):
@@ -448,8 +449,8 @@ def ldPruneSNPsRound1(infiles, outfile):
 
     plink_files = ",".join([bed_file, fam_file, bim_file])
     out_pattern = ".".join(outfile.split(".")[:-2])
-    job_memory = "5G"
-    job_threads = 12
+    job_memory = "4G"
+    job_threads = 10
 
     statement = '''
     python /ifs/devel/projects/proj045/gwas_pipeline/geno2qc.py
@@ -459,8 +460,11 @@ def ldPruneSNPsRound1(infiles, outfile):
     --method=ld_prune
     --keep=%(gwas_keep)s
     --use-kb
-    --memory=60G
+    --memory=30G
     --ignore-indels
+    --genotype-rate=0.1
+    --hardy-weinberg=0.00001
+    --min-allele-frequency=0.005
     --prune-method=%(ld_prune_method)s
     --step-size=%(ld_prune_step)s
     --window-size=%(ld_prune_window)s
@@ -512,8 +516,9 @@ def ldPruneSNPsRound2(infiles, outfile):
 
     plink_files = ",".join([bed_file, fam_file, bim_file])
     out_pattern = ".".join(outfile.split(".")[:-2])
-    job_memory = "5G"
-    job_threads = 12
+    job_memory = "4G"
+    job_threads = 10
+    prune_threshold = PARAMS['ld_prune_threshold'] - 0.05
 
     statement = '''
     python /ifs/devel/projects/proj045/gwas_pipeline/geno2qc.py
@@ -524,12 +529,15 @@ def ldPruneSNPsRound2(infiles, outfile):
     --method=ld_prune
     --keep=%(gwas_keep)s
     --use-kb
-    --memory=60G
+    --memory=30G
     --ignore-indels
+    --min-allele-frequency=0.005
+    --genotype-rate=0.1
+    --hardy-weinberg=0.00001
     --prune-method=%(ld_prune_method)s
     --step-size=%(ld_prune_step)s
     --window-size=%(ld_prune_window)s
-    --threshold=%(ld_prune_threshold)s
+    --threshold=%(prune_threshold)s
     --output-file-pattern=%(out_pattern)s
     --log=%(outfile)s.log
     %(plink_files)s
@@ -577,8 +585,9 @@ def ldPruneSNPsRound3(infiles, outfile):
 
     plink_files = ",".join([bed_file, fam_file, bim_file])
     out_pattern = ".".join(outfile.split(".")[:-2])
-    job_memory = "5G"
-    job_threads = 12
+    job_memory = "4G"
+    job_threads = 10
+    prune_threshold = PARAMS['ld_prune_threshold'] - 0.1
 
     statement = '''
     python /ifs/devel/projects/proj045/gwas_pipeline/geno2qc.py
@@ -589,12 +598,15 @@ def ldPruneSNPsRound3(infiles, outfile):
     --method=ld_prune
     --keep=%(gwas_keep)s
     --use-kb
-    --memory=60G
+    --memory=30G
     --ignore-indels
+    --min-allele-frequency=0.005
+    --genotype-rate=0.1
+    --hardy-weinberg=0.00001
     --prune-method=%(ld_prune_method)s
     --step-size=%(ld_prune_step)s
     --window-size=%(ld_prune_window)s
-    --threshold=%(ld_prune_threshold)s
+    --threshold=%(prune_threshold)s
     --output-file-pattern=%(out_pattern)s
     --log=%(outfile)s.log
     %(plink_files)s
@@ -892,7 +904,7 @@ def makeGRM(infiles, outfiles):
            regex("genome.dir/(.+).bed"),
            add_inputs([r"genome.dir/\1.fam",
                        r"genome.dir/\1.bim"]),
-           r"QC.dir/\1.genome")
+           r"QC.dir/\1.genome.gz")
 def calculateIdentityByDescent(infiles, outfile):
     '''
     Calculate the pair-wise estimates of IBS/IBD
@@ -929,131 +941,65 @@ def calculateIdentityByDescent(infiles, outfile):
     P.run()
 
 
-@follows(calculateIdentityByDescent,
-         mkdir("exclusions.dir"))
-@transform(calculateIdentityByDescent,
-           regex("QC.dir/(.+).genome.gz"),
-           r"exclusions.dir/\1.related")
-def filterRelated(infile, outfile):
-    '''
-    Filter individuals on relatedness, taking one
-    of each pair of related individuals above
-    and IBD sharing > 0.03125, or 3rd cousins.
-    '''
-
-    pass
-
-
-@follows(makeGRM)
-@transform(mergePlinkFiles,
-           regex("genome.dir/(.+).bed"),
-           add_inputs([r"genome.dir/\1.fam",
-                       r"genome.dir/\1.bim"]),
-           r"QC.dir/\1.rel.id")
-def excludeRelated(infiles, outfile):
-    '''
-    Find and exclude related individuals with IBD
-    >= a threshold. Recommend IBD <= 3rd cousins
-    (IBD >= 0.03125) - this can be parallelised
-
-    Plink2 recommend using the binary genotype
-    files as input, not the previously computed
-    GRM. See here for details:
-    https://www.cog-genomics.org/plink2/distance#rel_cutoff
-
-    # Plink seems to be over doing the trimming of
-    # individuals based on --rel-cutoff <- needs
-    # further investigation.
-    '''
-
-    bed_file = infiles[0]
-    fam_file = infiles[1][0]
-    bim_file = infiles[1][1]
-    job_memory = "10G"
-    job_threads = 24
-    plink_files = ",".join([bed_file, fam_file, bim_file])
-    out_pattern = ".".join(outfile.split(".")[:-2])
-
-    statement = '''
-    python /ifs/devel/projects/proj045/gwas_pipeline/geno2qc.py
-    --program=plink2
-    --input-file-format=plink_binary
-    --method=remove_relations
-    --threshold=%(relationship_cutoff)s
-    --memory=240G
-    --genotype-rate=0.9
-    --threads=%(job_threads)s
-    --keep-individuals=%(gwas_keep)s
-    --output-file-pattern=%(out_pattern)s
-    --log=%(outfile)s.log
-    %(plink_files)s
-    > %(outfile)s.plink.log
-    '''
-
-    P.run()
-
-
-@follows(makeGRM,
-         excludeRelated,
+@follows(mergePlinkFiles,
          mkdir("pca.dir"))
 @transform("genome.dir/WholeGenome.*",
            regex("genome.dir/(.+).bed"),
-           r"pca.dir/\1_naive.pcs")
+           add_inputs([r"genome.dir/\1.bim",
+                       r"genome.dir/\1.fam"]),
+           r"pca.dir/\1_naive.evec")
 def runNaivePCA(infiles, outfile):
     '''
-    Use flashPCA for large datasets to calculate first
-    N principal components on LD trimmed genotypes.
-    Run on total sample, before filtering for
-    self-reported ethnicity
-
-    flashPCA must be in the PATH variable
+    flashPCA breaks with too many samples
+    and SNPs.  Use smartpca from EIGENSOFT.
+    It's slower, but at least it works
     '''
 
     job_threads = PARAMS['pca_threads']
     job_memory = PARAMS['pca_memory']
 
-    plink_prefix = ".".join(infiles.split(".")[:-1])
+    bed_file = infiles[0]
+    bim_file = infiles[1][0]
+    fam_file = infiles[1][1]
     out_pattern = ".".join(outfile.split(".")[:-1])
-    eigenvecs = out_pattern + ".eigenvec"
-    propvar = out_pattern + ".pve"
-    outval = out_pattern + ".eigenval"
-    outmeansd = out_pattern + ".meansd"
-    loads = out_pattern + ".loadings"
+    
+    cwdir = os.getcwd()
+    params_file = "/".join([cwdir, "naive-smart_pca.par"])
+    # need to write to a text file
+    # with all the relevant parameters
+    # or use the perl script version
+    with open(params_file, "w") as pfile:
+        pfile.write("genotypename: %s \n" % bed_file)
+        pfile.write("snpname: %s \n" % bim_file)
+        pfile.write("indivname: %s \n" % fam_file)
+        pfile.write("evecoutname: %s.evec \n" % out_pattern)
+        pfile.write("evaloutname: %s.eval \n" % out_pattern)
+        pfile.write("altnormstyle: NO\n")
+        pfile.write("numoutevec: %i\n" % 20)
+        pfile.write("numoutlieriter: 5\n")
+        pfile.write("numoutlierevec: 20\n")
+        pfile.write("outliersigmathresh: 10\n")
+        pfile.write("fastmode: YES")
 
     statement = '''
-    flashpca
-    --numthreads %(job_threads)s
-    --seed %(seed)s
-    --bfile %(plink_prefix)s
-    --ndim 20
-    --stand binom
-    --method eigen
-    --v
-    --outpc %(outfile)s
-    --outvec %(eigenvecs)s
-    --outload %(loads)s
-    --outval %(outval)s
-    --outpve %(propvar)s
-    --outmeansd %(outmeansd)s
+    smartpca
+    -p %(params_file)s
     > %(outfile)s.log
     '''
 
     P.run()
 
 
-@follows(makeGRM,
-         excludeRelated,
+@follows(runNaivePCA,
          mkdir("pca.dir"))
 @transform("genome.dir/WholeGenome.*",
            regex("genome.dir/(.+).bed"),
            add_inputs([r"genome.dir/\1.fam",
                        r"genome.dir/\1.bim"]),
-           r"pca.dir/\1_filtered.pcs")
+           r"pca.dir/\1_filtered.evec")
 def runFilteredPCA(infiles, outfile):
     '''
-    Use flashPCA for large datasets to calculate first
-    N principal components on LD trimmed genotypes.
-
+    Use smartpca, flashpca doesn't work on these samples sizes yet
     Pre-filter samples for ethnicity.
 
     flashPCA must be in the PATH variable
@@ -1078,33 +1024,32 @@ def runFilteredPCA(infiles, outfile):
     %(plink_files)s
     '''
 
-    job_threads = PARAMS['pca_threads']
-    job_memory = PARAMS['pca_memory']
-
+    cwdir = os.getcwd()
+    params_file = "/".join([cwdir, "naive-smart_pca.par"])
     out_pattern = ".".join(outfile.split(".")[:-1])
-    eigenvecs = out_pattern + ".eigenvec"
-    propvar = out_pattern + ".pve"
-    outval = out_pattern + ".eigenval"
-    outmeansd = out_pattern + ".meansd"
-    loads = out_pattern + ".loadings"
+
+    # need to write to a text file
+    # with all the relevant parameters
+    # or use the perl script version
+    with open(params_file, "w") as pfile:
+        pfile.write("genotypename: %s.bed \n" % temp_out)
+        pfile.write("snpname: %s.bim \n" % temp_out)
+        pfile.write("indivname: %s.fam \n" % temp_out)
+        pfile.write("evecoutname: %s.evec \n" % out_pattern)
+        pfile.write("evaloutname: %s.eval \n" % out_pattern)
+        pfile.write("altnormstyle: NO\n")
+        pfile.write("numoutevec: %i\n" % PARAMS['pca_components'])
+        pfile.write("numoutlieriter: 5\n")
+        pfile.write("numoutlierevec: %i\n" % PARAMS['pca_components'])
+        pfile.write("outliersigmathresh: 10\n")
+        pfile.write("fastmode: YES")
 
     statement2 = '''
-    flashpca
-    --numthreads %(job_threads)s
-    --seed %(seed)s
-    --bfile %(temp_out)s
-    --ndim 20
-    --stand binom
-    --method eigen
-    --v
-    --outpc %(outfile)s
-    --outvec %(eigenvecs)s
-    --outload %(loads)s
-    --outval %(outval)s
-    --outpve %(propvar)s
-    --outmeansd %(outmeansd)s
+    smartpca
+    -p %(params_file)s
     > %(outfile)s.log
     '''
+
 
     statement = " ; ".join([statement1,
                             statement2])
@@ -1115,14 +1060,14 @@ def runFilteredPCA(infiles, outfile):
          runFilteredPCA)
 @transform([runNaivePCA,
             runFilteredPCA],            
-           regex("pca.dir/(.+).pcs"),
-           add_inputs([PARAMS['data_phenotypes'],
+           regex("pca.dir/(.+)_(.+).pcs"),
+           add_inputs([PARAMS['data_pheno_all'],
                        r"genome.dir/\1.fam"]),
-           r"plots.dir/\1_PC1vsPC2.png")
+           r"plots.dir/\1_\2-PC1vsPC2.png")
 def plotPcaResults(infiles, outfile):
     '''
-    Generate pairwise plots of the first
-    n principal components
+    Generate pairwise plot of the first
+    2 principal components
     '''
 
     pcs_file = infiles[0]
@@ -1235,6 +1180,100 @@ def findExcessHeterozygotes(infile, outfile):
     P.run()
 
 
+@follows(mergePlinkFiles)
+@transform(mergePlinkFiles,
+           regex("genome.dir/(.+).bed"),
+           add_inputs([r"genome.dir/\1.fam",
+                       r"genome.dir/\1.bim"]),
+           r"exclusions.dir/\1.rel.id")
+def excludeRelated(infiles, outfile):
+    '''
+    Find and exclude related individuals with IBD
+    >= a threshold. Recommend IBD <= 3rd cousins
+    (IBD >= 0.03125) - this can be parallelised
+
+    Plink2 recommend using the binary genotype
+    files as input, not the previously computed
+    GRM. See here for details:
+    https://www.cog-genomics.org/plink2/distance#rel_cutoff
+
+    # Plink seems to be over doing the trimming of
+    # individuals based on --rel-cutoff <- needs
+    # further investigation.
+    '''
+
+    bed_file = infiles[0]
+    fam_file = infiles[1][0]
+    bim_file = infiles[1][1]
+    job_memory = "10G"
+    job_threads = 24
+    plink_files = ",".join([bed_file, fam_file, bim_file])
+    out_pattern = ".".join(outfile.split(".")[:-2])
+
+    statement = '''
+    python /ifs/devel/projects/proj045/gwas_pipeline/geno2qc.py
+    --program=plink2
+    --input-file-format=plink_binary
+    --method=remove_relations
+    --threshold=%(relationship_cutoff)s
+    --memory=240G
+    --threads=%(job_threads)s
+    --keep-individuals=%(gwas_keep)s
+    --output-file-pattern=%(out_pattern)s
+    --log=%(outfile)s.log
+    %(plink_files)s
+    > %(outfile)s.plink.log
+    '''
+
+    P.run()
+
+@follows(excludeRelated)
+@transform(excludeRelated,
+           regex("exclusions.dir/(.+).rel.id"),
+           add_inputs(r"genome.dir/\1.fam"),
+           r"exclusions.dir/\1.related")
+def flagRelated(infiles, outfile):
+    '''
+    Diff the input .fam and the unrelated individuals
+    from the --rel-cutoff to get a set of related
+    individuals to exclude
+    '''
+
+    unrelated = infiles[0]
+    fam_file = infiles[1]
+
+    job_memory = "1G"
+    to_cluster = False
+    statement = '''
+    cat %(fam_file)s | tr -s ' ' '\\t' | cut -f 1,2
+    | diff %(unrelated)s - | grep ">" | sed 's/>//g'
+    > %(outfile)s
+    '''
+
+    P.run()
+
+
+@follows(calculateIdentityByDescent)
+@transform(calculateIdentityByDescent,
+           regex("QC.dir/(.+).genome.gz"),
+           r"plots.dir/IBD-hist.png")
+def plotIbdHistogram(infile, outfile):
+    '''
+    plot the distribution of IBD estimates
+    '''
+
+    statement = '''
+    python /ifs/devel/projects/proj045/gwas_pipeline/qcs2qc.py
+    --task=flag_relations
+    --relationship-file=%(infile)s
+    --ibs-cutoff=%(relationship_cutoff)s
+    --plotting-path=plots.dir
+    --log=%(outfile)s.log
+    '''
+
+    P.run()
+
+
 #################################
 # Association testing and other #
 # statistical testing tasks     #
@@ -1248,7 +1287,8 @@ if PARAMS['candidate_region']:
                regex("plink.dir/%s(.+).bed" % PARAMS['candidate_chromosome']),
                add_inputs([r"plink.dir/%s\1.fam" % PARAMS['candidate_chromosome'],
                            r"plink.dir/%s\1.bim" % PARAMS['candidate_chromosome'],
-                           r"plink.dir/%s\1.exclude" % PARAMS['candidate_chromosome']]),
+                           r"plink.dir/%s\1.exclude" % PARAMS['candidate_chromosome'],
+                           r"exclusions.dir/WholeGenome.gwas_exclude"]),
                r"candidate.dir/%s\1-candidate_region.bed" % PARAMS['candidate_chromosome'])
     def getCandidateRegion(infiles, outfile):
         '''
@@ -1262,7 +1302,7 @@ if PARAMS['candidate_region']:
         plink_files = ",".join([bed_file, fam_file, bim_file])
 
         exclude = infiles[1][2]
-
+        gwas_exclude = infiles[1][3]
         region = ",".join(PARAMS['candidate_region'].split(":")[-1].split("-"))
         out_pattern = ".".join(outfile.split(".")[:-1])
 
@@ -1272,6 +1312,7 @@ if PARAMS['candidate_region']:
         --input-file-format=plink_binary
         --method=format
         --keep-individuals=%(gwas_keep)s
+        --remove-individuals=%(gwas_exclude)s
         --restrict-chromosome=%(candidate_chromosome)s
         --snp-range=%(region)s
         --exclude-snps=%(exclude)s
@@ -1416,12 +1457,52 @@ if PARAMS['candidate_region']:
 else:
     pass
 
+
+@follows(excludeDiscordantGender,
+         findExcessHeterozygotes,
+         findExcessHomozygotes,
+         excludeInbred,
+         flagRelated)
+@transform("exclusions.dir/*.het_exclude",
+           regex("exclusions.dir/(.+).het_exclude"),
+           add_inputs([r"exclusions.dir/\1.inbred",
+                       r"exclusions.dir/\1.related",
+                       excludeDiscordantGender]),
+           r"exclusions.dir/\1.gwas_exclude")
+def mergeExclusions(infiles, outfile):
+    '''
+    Merge together files and drop duplicates
+    for individuals that fail QC steps
+    '''
+
+    hets = infiles[0]
+    inbreds = infiles[1][0]
+    related = infiles[1][1]
+    gender = infiles[1][2]
+
+    statement = '''
+    python /ifs/devel/projects/proj045/gwas_pipeline/qcs2qc.py
+    --task=merge_exclusions
+    --gender-check-file=%(gender)s
+    --relationship-file=%(related)s
+    --inbreeding-coef-file=%(inbreds)s
+    --heterozygotes-file=%(hets)s
+    --auxillary-file=%(gwas_remove)s
+    --log=%(outfile)s.log
+    > %(outfile)s
+    '''
+
+    P.run()
+
+
 @follows(convertToPlink,
+         mergeExclusions,
          mkdir("gwas.dir"))
 @transform("plink.dir/chr*",
            regex("plink.dir/(.+).bed"),
            add_inputs([r"plink.dir/\1.fam",
-                       r"plink.dir/\1.bim"]),
+                       r"plink.dir/\1.bim",
+                       r"exclusions.dir/WholeGenome.gwas_exclude"]),
            r"gwas.dir/\1_assoc.assoc")
 def unadjustedAssociation(infiles, outfile):
     '''
@@ -1429,14 +1510,14 @@ def unadjustedAssociation(infiles, outfile):
     Need to condition on array batch - field 22000
     '''
 
-    job_memory = "5G"
-    job_threads = int(PARAMS['gwas_threads'])
+    job_memory = "36G"
 
-    mem = int(job_memory.strip("G")) * job_threads
+    mem = int(job_memory.strip("G"))
     bed_file = infiles[0]
     fam_file = infiles[1][0]
     bim_file = infiles[1][1]
 
+    gwas_exclude = infiles[1][2]
     plink_files = ",".join([bed_file, fam_file, bim_file])
 
     out_pattern = ".".join(outfile.split(".")[:-1])
@@ -1445,57 +1526,51 @@ def unadjustedAssociation(infiles, outfile):
     python /ifs/devel/projects/proj045/gwas_pipeline/geno2assoc.py
     --program=plink2
     --input-file-format=plink_binary
+    --phenotypes-file=%(data_phenotypes)s
+    --pheno=%(format_pheno)s
     --method=association
     --keep=%(gwas_keep)s
+    --remove-individuals=%(gwas_exclude)s
     --association-method=assoc
-    --genotype-rate=0.01
-    --indiv-missing=0.01
+    --genotype-rate=0.1
     --hardy-weinberg=0.000001
     --min-allele-frequency=0.001
     --output-file-pattern=%(out_pattern)s
-    --threads=%(job_threads)s
     --memory=%(mem)s
     -v 5
     %(plink_files)s
-    > %(outfile)s.log
+    > %(outfile)s.plink.log
     '''
 
     P.run()
 
 
-@follows(excludeDiscordantGender,
-         findExcessHeterozygotes,
-         findExcessHomozygotes,
-         excludeInbred)
-@transform("QC.dir/*.het_exclude",
-           regex("QC.dir/(.+).het_exclude"),
-           add_inputs([r"QC.dir/\1.ibc",
-                       r"QC.dir/\1.het_exclude",
-                       genderChecker]),
-           r"QC.dir/\1.gwas_exclude")
-def mergeExclusions(infiles, outfile):
-    '''
-    Merge together files and drop duplicates
-    for individuals that fail QC steps
-    '''
-
-    pass
-
-
-@follows(runFilteredPCA,
+@follows(mkdir("covariates.dir"),
          mergeExclusions,
          unadjustedAssociation)
-@transform(runFilteredPCA,
-           regex("pca.dir/(.+)_filtered.pcs"),
-           add_inputs(PARAMS['data_phenotypes']),
-           r"phenotypes.dir/\1.covars")
+@transform("covariates.dir/*",
+           regex("covariates.dir/(.+).batch"),
+           r"covariates.dir/\1.covar")
 def mergeCovariates(infiles, outfile):
     '''
     Merge together all covariates for inclusion
     in the adjusted GWA
     '''
 
-    pass
+    covar_file = infiles
+    pca_file = PARAMS['gwas_pca']
+    covars = ",".join([covar_file, pca_file])
+    job_memory = "4G"
+
+    statement = '''
+    python /ifs/devel/projects/proj045/gwas_pipeline/pheno2pheno.py
+    --task=merge_covariates
+    --covariate-file=%(covars)s
+    --log=%(outfile)s.log
+    > %(outfile)s
+    '''
+
+    P.run()
 
 
 @follows(convertToPlink,
@@ -1505,8 +1580,10 @@ def mergeCovariates(infiles, outfile):
 @transform("plink.dir/chr*",
            regex("plink.dir/(.+).bed"),
            add_inputs([r"plink.dir/\1.fam",
-                       r"plink.dir/\1.bim"]),
-           r"gwas.dir/\1_assoc.assoc")
+                       r"plink.dir/\1.bim",
+                       r"exclusions.dir/WholeGenome.gwas_exclude",
+                       mergeCovariates]),
+           r"gwas.dir/\1_adj.assoc.%s" % PARAMS['gwas_model'])
 def pcAdjustedAssociation(infiles, outfile):
     '''
     Run an association analysis on SNPs MAF >= 1%
@@ -1514,35 +1591,38 @@ def pcAdjustedAssociation(infiles, outfile):
     Need to condition on array batch - field 22000
     '''
 
-    job_memory = "5G"
-    job_threads = int(PARAMS['gwas_threads'])
+    job_memory = "36G"
 
-    mem = int(job_memory.strip("G")) * job_threads
+    mem = int(job_memory.strip("G"))
     bed_file = infiles[0]
     fam_file = infiles[1][0]
     bim_file = infiles[1][1]
-
+    remove = infiles[1][2]
+    covariate_file = infiles[1][3]
     plink_files = ",".join([bed_file, fam_file, bim_file])
 
-    out_pattern = ".".join(outfile.split(".")[:-1])
+    out_pattern = ".".join(outfile.split(".")[:-2])
 
     statement = '''
     python /ifs/devel/projects/proj045/gwas_pipeline/geno2assoc.py
     --program=plink2
     --input-file-format=plink_binary
     --method=association
+    --phenotypes-file=%(data_phenotypes)s
+    --pheno=%(format_pheno)s
+    --covariates-file=%(covariate_file)s
+    --covariate-column=%(gwas_covars)s
     --keep=%(gwas_keep)s
-    --association-method=assoc
-    --genotype-rate=0.01
-    --indiv-missing=0.01
+    --remove-individuals=%(remove)s
+    --association-method=%(gwas_model)s
+    --genotype-rate=0.1
     --hardy-weinberg=0.000001
     --min-allele-frequency=0.001
     --output-file-pattern=%(out_pattern)s
-    --threads=%(job_threads)s
     --memory=%(mem)s
     -v 5
     %(plink_files)s
-    > %(outfile)s.log
+    > %(outfile)s.plink.log
     '''
 
     P.run()
@@ -1550,45 +1630,20 @@ def pcAdjustedAssociation(infiles, outfile):
 
 @follows(mkdir("plots.dir"),
          unadjustedAssociation)
-@transform(unadjustedAssociation,
-           regex("gwas.dir/(.+)_assoc.assoc"),
-           r"plots.dir/\1_manhattan.png")
-def plotChromosomeManhattan(infile, outfile):
-    '''
-    Generate a manhattan plot for each chromosome
-    from the unadjusted analysis
-    '''
-
-    job_memory = "1G"
-
-    statement = '''
-    python /ifs/devel/projects/proj045/gwas_pipeline/assoc2plot.py
-    --plot-type=manhattan
-    --resolution=chromosome
-    --save-path=%(outfile)s
-    --log=%(outfile)s.log
-    %(infile)s
-    '''
-
-    P.run()
-
-
-@follows(mkdir("plots.dir"),
-         unadjustedAssociation,
-         pcAdjustedAssociation)
-@collate([unadjustedAssociation,
-          pcAdjustedAssociation],
+@collate(unadjustedAssociation,
          regex("gwas.dir/(.+)_assoc.assoc"),
          r"plots.dir/WholeGenome_manhattan.png")
-def plotGenomeManhattan(infiles, outfile):
+def plotUnadjustedManhattan(infiles, outfile):
     '''
-    Generate a manhattan plot across each chromosome
-    from the unadjusted analysis
+    Generate a manhattan plot for the unadjusted
+    association analysis
     '''
-
-    job_memory = "6G"
+    job_memory = "16G"
 
     res_files = ",".join(infiles)
+    out_file = outfile.split("/")[-1]
+    out_file = out_file.split("-")[0]
+    out_file = "gwas.dir/" + out_file + ".results"
 
     statement = '''
     python /ifs/devel/projects/proj045/gwas_pipeline/assoc2plot.py
@@ -1597,17 +1652,50 @@ def plotGenomeManhattan(infiles, outfile):
     --save-path=%(outfile)s
     --log=%(outfile)s.log
     %(res_files)s
+    > %(out_file)s
+    '''
+
+    P.run()
+
+
+@follows(mkdir("plots.dir"),
+         unadjustedAssociation,
+         pcAdjustedAssociation,
+         plotUnadjustedManhattan)
+@collate(pcAdjustedAssociation,
+         regex("gwas.dir/(.+)_adj.assoc.%s" % PARAMS['gwas_model']),
+         r"plots.dir/WholeGenome_adj-manhattan.png")
+def plotGenomeManhattan(infiles, outfile):
+    '''
+    Generate a manhattan plot across each chromosome
+    from the unadjusted analysis
+    '''
+
+    job_memory = "16G"
+
+    res_files = ",".join(infiles)
+    out_file = outfile.split("/")[-1]
+    out_file = out_file.split("-")[0]
+    out_file = "gwas.dir/" + out_file + ".results"
+    statement = '''
+    python /ifs/devel/projects/proj045/gwas_pipeline/assoc2plot.py
+    --plot-type=manhattan
+    --resolution=genome_wide
+    --save-path=%(outfile)s
+    --log=%(outfile)s.log
+    %(res_files)s
+    > %(out_file)s
     '''
 
     P.run()
 
 # testing conditional analysis of multiple regions
 # make a load of dummy files first
-@follows(unadjustedAssociation,
+@follows(pcAdjustedAssociation,
          mkdir("conditional.dir"))
 @transform(PARAMS['gwas_hit_regions'],
            regex("(.+)/(.+)-(.+).tsv"),
-           r"conditional.dir/\1.tsv")
+           r"conditional.dir/\2.tsv")
 def splitRegionsFile(infile, outfile):
     '''
     Split a file containing genome intervals
@@ -1617,20 +1705,21 @@ def splitRegionsFile(infile, outfile):
     # I LOVE AWK!!!!
 
     statement = '''
-    cat %(infile)s | awk '{if(NR > 1) {printf("conditional.dir/%%i:%%i-%%i_%%s.tsv\\n",
-    $1, $2, $3, $4)}}' | awk '{system("touch " $0)}'
+    cat %(infile)s | awk '{if(NR > 1) {printf("conditional.dir/chr%%i-%%i-%%i_%%s.tsv\\n",
+    $1, $2, $3, $4)}}' | awk '{system("touch " $0)}';
     '''
 
     P.run()
+    P.touch(outfile)
 
 
 @follows(splitRegionsFile)
 @transform("conditional.dir/*.tsv",
-           regex("conditional.dir/(.+):(.+)-(.+)_(.+).tsv"),
-           add_inputs([r"plink.dir/chr\1impv1.bed",
-                       r"plink.dir/chr\1impv1.bim",
-                       r"plink.dir/chr\1impv1.fam"]),
-           r"conditional.dir/\1:\2-\3_\4.bed")
+           regex("conditional.dir/(.+)-(.+)-(.+)_(.+).tsv"),
+           add_inputs([r"plink.dir/\1gen.bed",
+                       r"plink.dir/\1gen.bim",
+                       r"plink.dir/\1gen.fam"]),
+           r"conditional.dir/\1-\2-\3_\4.bed")
 def getConditionalRegions(infiles, outfile):
     '''
     Pull out the regions of interest for downstream
@@ -1642,9 +1731,9 @@ def getConditionalRegions(infiles, outfile):
     bim_file = infiles[1][1]
     fam_file = infiles[1][2]
 
-    chrom = conditional_file.split("/")[-1].split(":")[0]
-    start = conditional_file.split("/")[-1].split(":")[1].split("-")[0]
-    end = conditional_file.split("/")[-1].split(":")[1].split("-")[1]
+    chrom = conditional_file.split("/")[-1].split("-")[0]
+    start = conditional_file.split("/")[-1].split("-")[1]
+    end = conditional_file.split("/")[-1].split("-")[2]
     end = end.split("_")[0]
 
     snp_range = ",".join([start, end])
@@ -1652,6 +1741,7 @@ def getConditionalRegions(infiles, outfile):
 
     out_pattern = outfile.strip(".bed")
 
+    job_memory = "40G"
     statement = '''
     python /ifs/devel/projects/proj045/gwas_pipeline/geno2assoc.py 
     --program=plink2 
@@ -1663,9 +1753,10 @@ def getConditionalRegions(infiles, outfile):
     --reformat-type=plink_binary
     --keep=%(gwas_keep)s
     --output-file-pattern=%(out_pattern)s
-    --memory=30G
+    --memory=%(job_memory)s
     --log=%(outfile)s.log
     %(plink_files)s
+    > %(outfile)s.plink.log
     '''
 
     P.run()
@@ -1673,10 +1764,12 @@ def getConditionalRegions(infiles, outfile):
 
 @follows(getConditionalRegions)
 @transform(getConditionalRegions,
-           regex("candidate.dir/(.+).bed"),
-           add_inputs([r"candidate.dir/\1.fam",
-                       r"candidate.dir/\1.bim"]),
-           r"candidate.dir/\1_conditional.%s" % PARAMS['conditional_model'])
+           regex("conditional.dir/(.+).bed"),
+           add_inputs([r"conditional.dir/\1.fam",
+                       r"conditional.dir/\1.bim",
+                       r"exclusions.dir/WholeGenome.gwas_exclude",
+                       mergeCovariates]),
+           r"conditional.dir/\1_conditional.assoc.%s" % PARAMS['conditional_model'])
 def conditionalAssociation(infiles, outfile):
     '''
     Perform association analysis conditional on
@@ -1688,39 +1781,388 @@ def conditionalAssociation(infiles, outfile):
     bim_file = infiles[1][1]
     plink_files = ",".join([bed_file, fam_file, bim_file])
 
-    out_pattern = ".".join(outfile.split(".")[:-1])
+    condition_snp = bed_file.split("/")[-1].split("_")[-1]
+    conditional_snp = condition_snp.rstrip(".bed")
+    remove = infiles[1][2]
+    covariate_file = infiles[1][3]
+
+    out_pattern = ".".join(outfile.split(".")[:-2])
+    job_memory = "40G"
 
     statement = '''
     python /ifs/devel/projects/proj045/gwas_pipeline/geno2assoc.py
     --program=plink2
     --input-file-format=plink_binary
     --method=association
-    --association-method=logistic
+    --association-method=%(conditional_model)s
+    --covariates-file=%(covariate_file)s
+    --covariate-column=%(gwas_covars)s
     --keep-individuals=%(gwas_keep)s
+    --remove-individuals=%(remove)s
     --genotype-rate=0.1
-    --indiv-missing=0.1
-    --hardy-weinberg=0.0001
-    --conditional-snp=rs12924101
-    --min-allele-frequency=0.01
+    --hardy-weinberg=0.000001
+    --memory=%(job_memory)s
+    --conditional-snp=%(conditional_snp)s
     --output-file-pattern=%(out_pattern)s
-    --threads=%(pca_threads)s
     --log=%(outfile)s.log
     -v 5
+    %(plink_files)s
+    > %(outfile)s.plink.log
+    '''
+
+    P.run()
+
+
+##############################################
+# test for epistasis between GWAS regions on #
+# the phenotype of interest.  Use gwas hit   #
+# regions                                    #
+##############################################
+
+
+
+@follows(getConditionalRegions,
+         mkdir("epistasis.dir"))
+@collate(getConditionalRegions,
+         regex("conditional.dir/(.+).bed"),
+         add_inputs([r"conditional.dir/\1.fam",
+                     r"conditional.dir/\1.bim"]),
+         r"epistasis.dir/GwasHits.bed")
+def mergeGwasHits(infiles, outfile):
+    '''
+    Take the GWAS hit regions and merge
+    into a single set of Plink files to test
+    epistatic interactions
+    '''
+
+    # generate text file that contains the names of the files
+    # to be merged
+    temp_file = P.getTempFilename(shared=True)
+    outpattern = ".".join(outfile.split(".")[:-1])
+    job_memory = "3G"
+    job_threads = 10
+
+    with open(temp_file, "w") as ofile:
+        for ifile in infiles:
+            ifile_bed = ifile[0]
+            ifile_fam = ifile[1][0]
+            ifile_bim = ifile[1][1]
+            ofile.write("%s\t%s\t%s\n" % (ifile_bed, ifile_bim, ifile_fam))
+
+    statement = '''
+    plink2
+    --merge-list %(temp_file)s
+    --threads %(job_threads)i
+    --out %(outpattern)s;
+    rm -rf %(temp_file)s
+    '''
+
+    P.run()
+
+
+@follows(mergeGwasHits)
+@transform(mergeGwasHits,
+           regex("epistasis.dir/(.+).bed"),
+           add_inputs([r"epistasis.dir/\1.fam",
+                       r"epistasis.dir/\1.bim"]),
+           r"epistasis.dir/\1.epi.cc")
+def screenEpistasis(infiles, outfile):
+    '''
+    Screen for epistatic interactions between
+    target loci of interest using fast-epistasis.
+
+    Specific interactions can be tested concretely
+    once candidates are identified
+
+    Only test SNPs with MAF <= 0.5%
+    '''
+    
+    bed_file = infiles[0]
+    fam_file = infiles[1][0]
+    bim_file = infiles[1][1]
+    plink_files = ",".join([bed_file, fam_file, bim_file])
+
+    out_pattern = ".".join(outfile.split(".")[:-2])
+    job_memory = "1G"
+    job_threads = 11
+
+    statement = '''
+    python /ifs/devel/projects/proj045/gwas_pipeline/geno2assoc.py
+    --program=plink2
+    --input-file-format=plink_binary
+    --method=epistasis
+    --epistasis-method=fast_epistasis
+    --epistasis-parameter=joint-efects
+    --min-allele-freq=0.005
+    --output-file-pattern=%(out_pattern)s
+    --log=%(outfile)s.log
+    --threads=%(job_threads)s
+    %(plink_files)s
+    > %(outfile)s.plink.log
+    '''
+
+    P.run()
+
+
+@follows(mergeGwasHits)
+@transform(mergeGwasHits,
+           regex("epistasis.dir/(.+).bed"),
+           add_inputs([r"epistasis.dir/\1.fam",
+                       r"epistasis.dir/\1.bim"]),
+           r"epistasis.dir/\1_VsRegion.epi.cc")
+def testEpistasisVsRegion(infiles, outfile):
+    '''
+    Test for epistasis with a set of specific variants
+    of interest provided in a Plink .set file
+
+    Only test SNPs with MAF <= 0.5%
+    '''
+    
+    bed_file = infiles[0]
+    fam_file = infiles[1][0]
+    bim_file = infiles[1][1]
+    plink_files = ",".join([bed_file, fam_file, bim_file])
+
+    out_pattern = ".".join(outfile.split(".")[:-2])
+    job_memory = "1G"
+    job_threads = 11
+
+    statement = '''
+    python /ifs/devel/projects/proj045/gwas_pipeline/geno2assoc.py
+    --program=plink2
+    --input-file-format=plink_binary
+    --method=epistasis
+    --epistasis-method=epistasis
+    --set-file=%(epistasis_set)s
+    --set-method="set-by-all"
+    --epistasis-threshold=%(epistasis_reporting)s
+    --epistasis-report-threshold=%(epistasis_threshold)s
+    --min-allele-freq=0.005
+    --output-file-pattern=%(out_pattern)s
+    --log=%(outfile)s.log
+    --threads=%(job_threads)s
+    %(plink_files)s
+    > %(outfile)s.plink.log
+    '''
+
+    P.run()
+
+#################################################
+# mixed model analysis on a subsample of the    #
+# data. Compute GRM from specific SNP set       #
+#################################################
+
+# take SNP set across limited region of MC1R
+@follows(convertToPlink,
+         mkdir("mlm.dir"))
+@transform("plink.dir/%s*" % PARAMS['mlm_grm_region'].split("-")[0],
+           regex("plink.dir/(.+).bed"),
+           add_inputs([r"plink.dir/\1.fam",
+                       r"plink.dir/\1.bim",
+                       r"plink.dir/\1.exclude",
+                       mergeExclusions]),
+           r"mlm.dir/\1_region.bed")
+def getGrmRegion(infiles, outfile):
+    '''
+    Get a specific region to generate the GRM for
+    the linear mixed model
+    '''
+
+    bed_file = infiles[0]
+    fam_file = infiles[1][0]
+    bim_file = infiles[1][1]
+    plink_files = ",".join([bed_file, fam_file, bim_file])
+
+    exclude = infiles[1][2]
+    gwas_exclude = infiles[1][3]
+    out_pattern = ".".join(outfile.split(".")[:-1])
+    chromosome = PARAMS['mlm_grm_region'].split("-")[0]
+    region = ",".join(PARAMS['mlm_grm_region'].split("-")[1:])
+    
+    job_memory = "30G"
+
+    statement = '''
+    python /ifs/devel/projects/proj045/gwas_pipeline/geno2assoc.py
+    --program=plink2
+    --input-file-format=plink_binary
+    --method=format
+    --keep-individuals=%(gwas_keep)s
+    --remove-individuals=%(gwas_exclude)s
+    --restrict-chromosome=%(chromosome)s
+    --snp-range=%(region)s
+    --exclude-snps=%(exclude)s
+    --format-method=change_format
+    --format-parameter=%(format_gender)s
+    --update-sample-attribute=gender
+    --reformat-type=plink_binary
+    --output-file-pattern=%(out_pattern)s
+    --log=%(outfile)s.log
     %(plink_files)s
     '''
 
     P.run()
 
 
-################################################
+@follows(getGrmRegion)
+@transform("mlm.dir/*.fam",
+           regex("mlm.dir/(.+).fam"),
+           add_inputs("%s" % PARAMS['gwas_keep']),
+           r"mlm.dir/\1.keep")
+def subSampleIndividuals(infiles, outfile):
+    '''
+    Subsample from the total population
+    to get ~n individuals for linear
+    model analysis.  
+    Output with combined list of ethnically
+    selected individuals
+    '''
+
+    fam_file = infiles[0]
+    keep_file = infiles[1]
+    keep_temp = P.getTempFilename(shared=True)
+    fam_temp = P.getTempFilename(shared=True)
+
+    statement = '''
+    cat %(keep_file)s | cut -f1,2 | sort | grep -v "FID" > %(keep_temp)s;
+    cat %(fam_file)s | tr " " "\\t" | cut -f1,2 | sort > %(fam_temp)s;
+    comm -12 %(fam_temp)s %(keep_temp)s | shuf -n %(mlm_subsample)s
+    > %(outfile)s;
+    rm -rf %(keep_temp)s %(fam_temp)s
+    '''
+
+    P.run()
+
+
+@follows(getGrmRegion,
+         subSampleIndividuals)
+@transform("mlm.dir/*.bed",
+           regex("mlm.dir/(.+).bed"),
+           add_inputs([r"mlm.dir/\1.fam",
+                       r"mlm.dir/\1.bim",
+                       subSampleIndividuals]),
+           r"mlm.dir/\1.grm.N.bin")
+def calcRegionGrm(infiles, outfiles):
+    '''
+    Calculate the realised GRM across all region
+    variants. Use multi-threading, no parallelisation
+    required.
+    '''
+
+    job_threads = PARAMS['grm_threads']
+    # memory per thread
+    job_memory = "8G"
+
+    bed_file = infiles[0]
+    fam_file = infiles[1][0]
+    bim_file = infiles[1][1]
+    grm_keep = infiles[1][2]
+
+    plink_files = ",".join([bed_file, fam_file, bim_file])
+    out_pattern = ".".join(outfiles.split(".")[:-3])
+
+    statement= '''
+    python /ifs/devel/projects/proj045/gwas_pipeline/geno2assoc.py
+    --program=gcta
+    --threads=%(job_threads)s
+    --input-file-format=plink_binary
+    --keep-individuals=%(grm_keep)s
+    --method=matrix
+    --matrix-compression=bin
+    --matrix-form=grm
+    --output-file-pattern=%(out_pattern)s
+    --log=%(outfiles)s.log
+    %(plink_files)s
+    > %(outfiles)s.gcta.log
+    '''
+
+    P.run()
+
+
+@follows(calcRegionGrm)
+@transform("mlm.dir/*.fam",
+           regex("mlm.dir/(.+).fam"),
+           r"mlm.dir/\1.pheno")
+def subsetPhenotype(infile, outfile):
+    '''
+    Generate a phenotype file of the subset
+    individuals from the .fam file.
+
+    GCTA doesn't like having extraneous phenotype
+    data when the sample size is large
+    '''
+
+    job_memory = "1G"
+
+    statement = '''
+    cat %(infile)s | tr " " "\\t" | cut -f 1,2,6 |
+    awk 'BEGIN {printf("FID\\tIID\\tPHENO\\n")} {print $0}'
+    > %(outfile)s'''
+
+    P.run()
+
+
+@follows(subsetPhenotype)
+@transform("plink.dir/*.bed",
+           regex("plink.dir/(.+).bed"),
+           add_inputs([r"plink.dir/\1.fam",
+                       r"plink.dir/\1.bim",
+                       mergeExclusions,
+                       subsetPhenotype,
+                       r"covariates.dir/WholeGenome.batch"]),
+           r"mlm.dir/\1.mlma")
+def runMixedModel(infiles, outfile):
+    '''
+    Run a linear mixed-model association analysis
+    on the subset individuals.
+    '''
+
+    job_threads = PARAMS['grm_threads']
+    # memory per thread
+    job_memory = "7G"
+
+    bed_file = infiles[0]
+    fam_file = infiles[1][0]
+    bim_file = infiles[1][1]
+    mlm_exclude = infiles[1][2]
+    mlm_pheno = infiles[1][3]
+    mlm_covar = infiles[1][4]
+    grm_prefix = ".".join(mlm_pheno.split(".")[:-1])
+
+    plink_files = ",".join([bed_file, fam_file, bim_file])
+    out_pattern = ".".join(outfile.split(".")[:-1])
+
+    statement= '''
+    python /ifs/devel/projects/proj045/gwas_pipeline/geno2assoc.py
+    --program=gcta
+    --threads=%(job_threads)s
+    --input-file-format=plink_binary
+    --method=lmm
+    --lmm-method=standard
+    --min-allele-frequency=0.01
+    --grm-prefix=%(grm_prefix)s
+    --remove-individuals=%(mlm_exclude)s
+    --phenotypes-file=%(mlm_pheno)s
+    --pheno=1
+    --covariates-file=%(gwas_pca)s
+    --discrete-covariates-file=%(mlm_covar)s
+    --output-file-pattern=%(out_pattern)s
+    --log=%(outfile)s.log
+    %(plink_files)s
+    > %(outfile)s.gcta.log
+    '''
+
+    P.run()
+
+    
+#################################################
 # these next tasks aren't strictly GWA, but     #
 # they do use genome-wide genotying nonetheless #
 #################################################
 
 @follows(mergePlinkFiles,
          mkdir("fst.dir"))
-@transform(mergePlinkFiles,
-           regex("genome.dir/*.bed"),
+@transform("genome.dir/WholeGenome.*",
+           regex("genome.dir/(.+).bed"),
            add_inputs([r"genome.dir/\1.fam",
                        r"genome.dir/\1.bim"]),
            r"fst.dir/\1.fst")
@@ -1739,15 +2181,16 @@ def getGenomeWideFst(infiles, outfile):
     plink_files = ",".join([bed_file, fam_file, bim_file])
 
     out_pattern = ".".join(outfile.split(".")[:-1])
+    job_memory = "20G"
 
     statement = '''
     python /ifs/devel/projects/proj045/gwas_pipeline/geno2assoc.py
     --program=plink2
     --input-file-format=plink_binary
     --method=summary
-    --summary-method=wrights_fst
-    --summary-parameter="case-control"
-    --output-file-pattern%(out_pattern)s
+    --summary-method=case_control_fst
+    --summary-parameter=case-control
+    --output-file-pattern=%(out_pattern)s
     --log=%(outfile)s.log
     -v 5
     %(plink_files)s
@@ -1760,8 +2203,8 @@ def getGenomeWideFst(infiles, outfile):
 @follows(mergePlinkFiles,
          getGenomeWideFst,
          mkdir("fst.dir"))
-@transform(mergePlinkFiles,
-           regex("plink.dir/*.bed"),
+@transform(convertToPlink,
+           regex("plink.dir/(.+).bed"),
            add_inputs([r"plink.dir/\1.fam",
                        r"plink.dir/\1.bim",
                        r"plink.dir/\1.exclude"]),
@@ -1790,9 +2233,9 @@ def getFstByChromosome(infiles, outfile):
     --input-file-format=plink_binary
     --method=summary
     --exclude-snps=%(exclude_file)s
-    --summary-method=wrights_fst
+    --summary-method=case_control_fst
     --summary-parameter="case-control"
-    --output-file-pattern%(out_pattern)s
+    --output-file-pattern=%(out_pattern)s
     --log=%(outfile)s.log
     -v 5
     %(plink_files)s
@@ -1913,7 +2356,8 @@ def dissectPCA(infile, outfile):
 @follows(runFilteredPCA,
          plotPcaResults,
          excludeInbred,
-         calculateIdentityByDescent,
+         excludeRelated,
+         plotIbdHistogram,
          mergeExclusions)
 def QC():
     pass

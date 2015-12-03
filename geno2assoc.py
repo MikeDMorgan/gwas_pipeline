@@ -71,11 +71,16 @@ def main(argv=None):
                       help="either phenotype file column header or number")
 
     parser.add_option("--covariates-file", dest="covariate_file", type="string",
-                      help="file containing covariates")
+                      help="file containing covariates.  Used as the "
+                      "continuous covariates in GCTA-based analyses")
 
     parser.add_option("--covariate-column", dest="covar_col", type="string",
                       help="column number(s) or header(s) to include in "
                       "association model")
+
+    parser.add_option("--discrete-covariates-file", dest="covariate_discrete",
+                      type="string", help="file containing discrete covariates "
+                      "to adjust for in GCTA-based analyses")
 
     parser.add_option("--association-model", dest="assoc_model", type="choice",
                       choices=["recessive", "dominant", "genotype"],
@@ -83,9 +88,41 @@ def main(argv=None):
 
     parser.add_option("--method", dest="method", type="choice",
                       choices=["association", "summary", "format", "matrix",
-                               "reml", "pca", "lmm", "simulation"],
+                               "reml", "pca", "lmm", "simulation",
+                               "epistasis"],
                       help="method to apply to genome-wide data")
 
+    parser.add_option("--lmm-method", dest="lmm_method", type="choice",
+                      choices=["standard", "loco", "no_covar"],
+                      help="type of linear mixed model analysis to run")
+
+    parser.add_option("--grm-prefix", dest="grm_prefix", type="string",
+                      help="prefix of the pre-computed GRM files to use "
+                      "in the linear mixed model analysis")
+
+    parser.add_option("--epistasis-method", dest="epi_method", type="choice",
+                      choices=["fast_epistasis", "epistasis", "two_locus"],
+                      help="epistasis method to use")
+
+    parser.add_option("--epistasis-parameter", dest="epi_param", type="string",
+                      help="modifiers of epistasis functions")
+
+    parser.add_option("--epistasis-threshold", dest="epi_sig", type="string",
+                      help="statistical significance threshold for counting "
+                      "interactions")
+
+    parser.add_option("--epistasis-report-threshold", dest="epi_report",
+                      type="string", help="threshold used to count the "
+                      "proportion of statistically significant interactions")
+
+    parser.add_option("--set-file", dest="set_file", type="string",
+                      help="file containing variant sets as per Plink "
+                      ".set file specification")
+
+    parser.add_option("--set-method", dest="set_method", type="choice",
+                      choices=["set-by-all", "set-by-set"],
+                      help="set method to use when `set_file` provided")
+    
     parser.add_option("--principal-components", dest="num_pcs", type="int",
                       help="the number of principal components to output")
 
@@ -180,7 +217,7 @@ def main(argv=None):
     parser.add_option("--summary-method", dest="summary_method", type="choice",
                       choices=["allele_frequency", "missing_data", "hardy_weinberg",
                                "mendel_errors", "inbreeding", "gender_checker",
-                               "wrights_fst"],
+                               "wrights_fst", "case_control_fst"],
                       help="summary statistics to calculate")
 
     parser.add_option("--summary-parameter", dest="sum_param", type="string",
@@ -218,7 +255,7 @@ def main(argv=None):
                       help="a file containing individuals IDs to keep, "
                       "one per row")
 
-    parser.add_option("--remove-invidivals", dest="filt_remove", type="string",
+    parser.add_option("--remove-individuals", dest="filt_remove", type="string",
                       help="a file of individual IDs to remove, one per row")
 
     parser.add_option("--min-quality-score", dest="filt_min_qaul_score", type="string",
@@ -331,7 +368,9 @@ def main(argv=None):
                         random_seed=random.randint(0, 19999),
                         sample_update=None,
                         memory="60G",
-                        parallel=None)
+                        parallel=None,
+                        covariate_file=None,
+                        covar_col=None)
 
     if not options.infile_pattern:
         infiles = (argv[-1]).split(",")
@@ -392,6 +431,8 @@ def main(argv=None):
             gwas_object._output_statistics(gender_checker=options.sum_param)
         elif options.summary_method == "wrights_fst":
             gwas_object._output_statistics(wrights_fst=options.sum_param)
+        elif options.summary_method == "case_control_fst":
+            gwas_object._output_statistics(case_control_fst=options.sum_param)
         else:
             pass
     elif options.method == "pca":
@@ -400,7 +441,22 @@ def main(argv=None):
         gwas_object.run_association(association=options.assoc_method,
                                     permutation=options.permutation,
                                     n_perms=options.n_perms,
-                                    random_seed=options.random_seed)
+                                    random_seed=options.random_seed,
+                                    covariates_file=options.covariate_file,
+                                    covariates=options.covar_col)
+    elif options.method == "lmm":
+        print options.lmm_method
+        gwas_object.mixed_model(lmm_method=options.lmm_method,
+                                grm=options.grm_prefix,
+                                qcovar=options.covariate_file,
+                                dcovar=options.covariate_discrete)                                
+    elif options.method == "epistasis":
+        gwas_object._detect_interactions(method=options.epi_method,
+                                         modifier=options.epi_param,
+                                         set_file=options.set_file,
+                                         set_mode=options.set_method,
+                                         report_threshold=float(options.epi_report),
+                                         sig_threshold=float(options.epi_sig))
     elif options.method == "format":
         if options.format_method == "change_format":
             # adding filtering options to plink requires the --make-bed flag

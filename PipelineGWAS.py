@@ -414,6 +414,10 @@ class GCTA(GWASProgram):
             self._construct_filters(min_allele_frequency=filter_value)
         elif filter_type == "max_allele_frequency":
             self._construct_filters(max_allele_frequency=filter_value)
+        elif filter_type == "keep":
+            self._construct_filters(keep=filter_value)
+        elif filter_type == "remove":
+            self._construct_filters(remove=filter_value)
 
     def _construct_filters(self, **kwargs):
         '''
@@ -514,6 +518,39 @@ class GCTA(GWASProgram):
         self.filters.append(" ".join(filters))
         self.statement["filters"] = " ".join(self.filters)
 
+    def mixed_model(self, lmm_method, grm=None, qcovar=None,
+                    dcovar=None):
+        '''
+        Run a linear mixed model with the GRM used to model
+        random effects of an estimated genetic relationshi
+        between individuals
+        '''
+
+        # add the mlm flag to the statement
+        self._run_tasks(lmm=lmm_method)
+
+        # construct the rest of mlm statement
+        statement = []
+        if qcovar:
+            statement.append(" --qcovar %s " % qcovar)
+        else:
+            pass
+
+        if dcovar:
+            statement.append(" --covar %s " % dcovar)
+        else:
+            pass
+
+        try:
+            statement.append(" --grm %s " % grm)
+        except ValueError:
+            E.warn("No GRM has been provided, the GRM "
+                   "will be computed for each chromosome."
+                   "Beware this may be VERY slow")
+
+        self.statement["mlm"] = " ".join(statement)
+
+
     def _run_tasks(self, parameter=None, **kwargs):
         '''
         The principal functions of GCTA revolve around GRM estimation
@@ -566,7 +603,7 @@ class GCTA(GWASProgram):
                                        "fixed_cor": " --reml-bivar %s --reml-bivar-lrt-rg %s "},
                     "lmm": {"standard": " --mlma ",
                             "loco": " --mlma-loco ",
-                            "covar": " --mlma-no-adj-covar "},
+                            "no_covar": " --mlma-no-adj-covar "},
                     "remove_relations": {"cutoff": " --grm-cutoff %s "}}
 
         for task, value in kwargs.iteritems():
@@ -680,6 +717,11 @@ class GCTA(GWASProgram):
         
         try:
             statement.append(self.statement["matrix"])
+        except KeyError:
+            pass
+
+        try:
+            statement.append(self.statement["mlm"])
         except KeyError:
             pass
 
@@ -1379,7 +1421,8 @@ class Plink2(GWASProgram):
                      "inbreeding_coef": " --ibc ",
                      "gender_checker": " --check-sex ",
                      "gender_impute": " --impute-sex ",
-                     "wrights_fst": " --fst --within %s "}
+                     "wrights_fst": " --fst --within %s ",
+                     "case_control_fst": "--fst %s "}
 
         statement = []
         for key, value in kwargs.iteritems():
@@ -1469,7 +1512,7 @@ class Plink2(GWASProgram):
             * `beta` - reports the beta coefficients instead of the OR in a
             logistic model. {CC}
             * `standard-beta` - standardizes the phenotype and all predictor
-            variables to zero mean and unit variance prior to regressionm
+            variables to zero mean and unit variance prior to regression
             (separate for each variant analysed). {quant}
             * `intercept` - includes the intercept in the output results.
             {quant}
@@ -1580,28 +1623,41 @@ class Plink2(GWASProgram):
         # if using linear or logistic, covariates can be added into the model
         # to adjust for their effects - assumes fixed effects of covariates
         # mixed models are not yet implemented in Plink2.
-
         if covariates:
-            if type(covariates[0]) == str:
-                covar_names = ",".join([c for c in covariates])
-                m_covar = " --covar-name %s " % covar_names
+            covars = covariates.split(",")
+            if len(covars) > 1:
+                if type(covars[0]) == str:
+                    m_covar = " --covar-name %s " % covariates
 
-            elif type(covariates[0]) == int:
-                covar_nums = ",".join([ci for ci in covariates])
-                m_covar = " --covar-number %s " % covar_nums
-            else:
-                # if none are specified then don't adjust the model for any
-                # and log a warning
-                E.warn("Covariate header or numbers are not recognised."
-                       "No covariates will be included in the model.  Please"
-                       "specifiy them exactly")
-                covariates = None
-                covariates_file = None
-        else:
-            pass
+                elif type(covars[0]) == int:
+                    m_covar = " --covar-number %s " % covariates
+                else:
+                    # if none are specified then don't adjust the model for any
+                    # and log a warning
+                    E.warn("Covariate header or numbers are not recognised."
+                           "No covariates will be included in the model.  Please"
+                           "specifiy them exactly")
+                    covariates = None
+                    covariates_file = None
+            elif len(covars) == 1:
+                if type(covars) == str:
+                    m_covar = " --covar-name %s " % covariates
+
+                elif type(covars) == int:
+                    m_covar = " --covar-number %i " % covariates
+                else:
+                    # if none are specified then don't adjust the model for any
+                    # and log a warning
+                    E.warn("Covariate header or numbers are not recognised."
+                           "No covariates will be included in the model.  Please"
+                           "specifiy them exactly")
+                    covariates = None
+                    covariates_file = None
+            
 
         if covariates and covariates_file:
-            statement.append(" --covar %s %s " % m_covar)
+            statement.append(" --covar %s %s " % (covariates_file,
+                                                  m_covar))
         elif covariates and not covaries_file:
             E.warn("No covariate file specified.  None included in model.")
         elif covariates_file and not covariates:
@@ -1631,6 +1687,67 @@ class Plink2(GWASProgram):
         '''
 
         # FINISH ME!!!!
+
+    def _detect_interactions(self, method=None, modifier=None,
+                             set_file=None, set_mode=None,
+                             report_threshold=None,
+                             sig_threshold=None):
+        '''
+        Detect epistatic interactions between SNPs using either an inaccurate
+        scan (fast-epistasis) or a fully saturated linear model
+    
+        Methods
+        -------
+        fast_epistasis - uses an "imprecise but fast" scan of all 3x3 joint genotype
+        count tables to test for interactions.  Can be modified to use a likelihood
+        ration test `boost` or a joint-effects test `joint-effects`. Default is
+        `joint-effects`.
+
+        epistasis - uses a linear model to test for interactions between additive
+        effects after main effects.  Logistic regression for case/control and
+        linear regression for quantitative traits.
+
+        two_locus - tests a single interaction between two variants using joint genotype
+        counts and frequencies.
+        '''
+
+        interact_map = {"fast_epistasis": " --fast-epistasis %s ",
+                        "epistasis": " --epistasis %s ",
+                        "two_locus": " --twolocus %s "}
+
+        statement = []
+
+        if modifier:
+            statement.append(interact_map[method] % modifier)
+        else:
+            modifier = ""
+            statement.append(interact_map[method] % modifier)
+
+        if set_mode and set_file:
+            # does not work with two-locus test
+            if method == "two_locus" and set_mode:
+                E.warn("Two locus test cannot be used in conjunction "
+                       "with a set-based test.")
+            elif set_mode:
+                statement.append(" %s  --set %s " % (set_mode, set_file))
+            else:
+                pass
+        else:
+            pass
+
+        # alter reporting of significant interactions and significance
+        # level of interactions
+        if report_threshold:
+            statement.append(" --epi1 %0.3f " % report_threshold)
+        else:
+            pass
+
+        if sig_threshold:
+            statement.append(" --epi2 %0.3f " % sig_threshold)
+        else:
+            pass
+
+        self.statement["epistasis"] = " ".join(statement)
 
     def _matrices(self, matrix_type, shape="triangle", compression=None, options=None):
         '''
@@ -1829,6 +1946,11 @@ class Plink2(GWASProgram):
         except KeyError:
             pass
 
+        try:
+            statement.append(self.statement["epistasis"])
+        except KeyError:
+            pass
+
         if threads:
             statement.append(" --threads %i " % threads)
         else:
@@ -1935,7 +2057,7 @@ class GWASResults(object):
             df = df.append(_df)
 
         df["CHR"] = df["CHR"].astype(np.int64)
-        df.sort(columns=["CHR", "BP"], inplace=True)
+        df.sort_values(by=["CHR", "BP"], inplace=True)
 
         return df
 
@@ -1960,7 +2082,10 @@ class GWASResults(object):
                 for i in range(parsed.count('')):
                     parsed.remove('')
                 # get rid of the newline
-                parsed.remove("\n")
+                try:
+                    parsed.remove('\n')
+                except ValueError:
+                    parsed = [(px).rstrip("\n") for px in parsed]
                 if l_count == 0:
                     header = [iy for ix, iy in enumerate(parsed)]
                     head_idx = [ix for ix, iy in enumerate(parsed)]
@@ -1977,27 +2102,49 @@ class GWASResults(object):
         # substract one from the index for the header column
         df_idx = range(l_count-1)
 
+        print association_file
         results_frame = pd.DataFrame(res_dict, index=df_idx)
+        results_frame.fillna(value=1.0, inplace=True)
+        try:
+            results_frame = results_frame[results_frame["TEST"] == "ADD"]
+        except KeyError:
+            pass
+
+        print results_frame.head()
+        # need to handle NA as strings
+        results_frame["P"][results_frame["P"] == "NA"] = 1.0
+
         results_frame["BP"] = [int(bx) for bx in results_frame["BP"]]
         results_frame["P"] = [np.float64(fx) for fx in results_frame["P"]]
         try:
+            results_frame["STAT"][results_frame["STAT"] == "NA"] = 1.0
             results_frame["STAT"] = [np.float64(sx) for sx in results_frame["STAT"]]
         except KeyError:
-            results_frame["CHISQ"] = [np.float64(sx) for sx in results_frame["CHISQ"]]
+            try:
+                results_frame["CHISQ"][results_frame["CHISQ"] == "NA"] = 1.0
+                results_frame["CHISQ"] = [np.float64(sx) for sx in results_frame["CHISQ"]]
+            except KeyError:
+                results_frame["T"][results_frame["T"] == "NA"] = 1.0
+                results_frame["T"] = [np.float64(sx) for sx in results_frame["T"]]
+
         try:
+            results_frame["F_U"][results_frame["F_U"] == "NA"] = 1.0
             results_frame["F_U"] = [np.float64(ux) for ux in results_frame["F_U"]]
         except KeyError:
             pass
 
         try:
+            results_frame["F_A"][results_frame["F_A"] == "NA"] = 1.0
             results_frame["F_A"] = [np.float64(ax) for ax in results_frame["F_A"]]
         except KeyError:
             pass
 
         try:
+            results_frame["OR"][results_frame["OR"] == "NA"] = 1.0
             results_frame["OR"] = [np.float64(ox) for ox in results_frame["OR"]]
         except KeyError:
-            pass
+            results_frame["BETA"][results_frame["BETA"] == "NA"] = 1.0
+            results_frame["BETA"] = [np.float64(ox) for ox in results_frame["BETA"]]
 
         return results_frame
 
@@ -2010,7 +2157,7 @@ class GWASResults(object):
 
         # use the python ggplot plotting package
         # need to calculate -log10P values separately
-        self.results["log10P"] = np.log(self.results["P"])
+        self.results["log10P"] = np.log10(self.results["P"])
 
         # or using rpy2
         py2ri.activate()
@@ -2020,7 +2167,7 @@ class GWASResults(object):
         r_df = py2ri.py2ri_pandasdataframe(self.results)
         R.assign("assoc.df", r_df)
         if resolution == "chromosome":
-            R('''p <- ggplot(assoc.df, aes(x=BP, y=-log10P)) + geom_point() + '''
+            R('''p <- ggplot(assoc.df, aes(x=BP, y=-log10(P))) + geom_point() + '''
               '''theme_bw() + labs(x="Chromosome position (bp)", '''
               '''y="-log10 P-value")''')
             R('''png("%s")''' % save_path)
@@ -2418,7 +2565,7 @@ def parseFlashPCA(pcs_file, fam_file):
     as the input order in the .fam file
     '''
 
-    pc_df = pd.read_table(pcs_file, sep="\t",
+    pc_df = pd.read_table(pcs_file, sep=None,
                           header=None, index_col=None)
     # add a header to the pc_df file
     headers = ["PC%i" % m for n, m in enumerate(pc_df.columns)]
@@ -2480,6 +2627,7 @@ def plotPCA(data, nPCs, point_labels, save_path,
     '''
 
     py2ri.activate()
+
     if metadata:
         meta_df = pd.read_table(metadata, sep="\t", header=0,
                                 index_col=None)
@@ -2576,6 +2724,202 @@ def countByVariantAllele(ped_file, map_file):
            "%i individuals" % (len(genos), tcount))
 
     return maf_df
+
+
+def calcMaxAlleleFreqDiff(ped_file, map_file, group_file,
+                          test=None, ref=None):
+    '''
+    Calculate the allele frequency difference between
+    two groups of individuals based upon some prior
+    assignment.
+
+    Arguments
+    ---------
+    ped_file: string
+      plink text format .ped file - see Plink documentation
+      for details (https://www.cog-genomics.org/plink2/input#ped)
+
+    map_file: string
+      plink test format .map file - see Plink documentation
+      for details (https://www.cog-genomics.org/plink2/input#ped)
+
+    group_file: string
+      a file containing grouping information, must be in standard
+      Plink format with IID, FID, GROUP as the columns
+
+    test: string
+      group label to use as the test case for calculating
+      allele frequency differences.  If this isn't set, then
+      the first non-ref value encountered will be set as test
+
+    ref: string
+      group label to use as the reference case for calculating
+      allele frequency differences.  If not set, then the first
+      value encountered will be the test.
+
+    Returns
+    -------
+    freq_diffs: pandas.Core.DataFrame
+      dataframe of SNP information and allele frequency difference
+      between group labels
+    '''
+
+    # group labels need to be of the same type, convert all
+    # group values to string
+    group_df = pd.read_table(group_file, sep="\t", header=0,
+                             index_col=None, 
+                             converters={"GROUP": str,
+                                         "FID": str,
+                                         "IID": str})
+
+    group_df["GROUP"] = [str(xg) for xg in group_df["GROUP"]]
+
+    try:
+        assert ref
+        E.info("Reference label set to %s" % ref)
+    except AssertionError:
+        ref = set(group_df["GROUP"])[0]
+        E.info("Reference label not provided.  Setting "
+               "reference label to %s" % ref)
+
+    try:
+        assert test
+        E.info("Test label set to %s" % test)
+    except AssertionError:
+        test = [tx for tx in set(group_df["GROUP"]) if not ref][0]
+        E.info("Test label not provided, setting test "
+               "label to %s." % test)
+
+    # parse the ped file - get the variant column headers from
+    # the map file - no headers with these files
+    # variant order in the map file matters, use an ordered dict
+    variants = collections.OrderedDict()
+    with open(map_file, "r") as mfile:
+        for snp in mfile.readlines():
+            attrs = snp.split("\t")
+            snpid = attrs[1]
+            variants[snpid] = {"chr": attrs[0],
+                               "pos": attrs[-1].strip("\n")}
+
+    variant_ids = variants.keys()
+    # store genotype matrix as an array
+    # rows and columns are variant IDs
+    ref_homA1 = np.zeros((len(variant_ids), len(variant_ids)),
+                         dtype=np.int64)
+
+    ref_homA2 = np.zeros((len(variant_ids), len(variant_ids)),
+                         dtype=np.int64)
+
+    ref_het  = np.zeros((len(variant_ids), len(variant_ids)),
+                        dtype=np.int64)
+
+    test_homA1 = np.zeros((len(variant_ids), len(variant_ids)),
+                          dtype=np.int64)
+
+    test_homA2 = np.zeros((len(variant_ids), len(variant_ids)),
+                          dtype=np.int64)
+
+    test_het  = np.zeros((len(variant_ids), len(variant_ids)),
+                         dtype=np.int64)
+    tcount = 0
+    rcount = 0
+    ncount = 0
+    ref_ids = group_df["IID"][group_df["GROUP"] == ref].values
+    test_ids = group_df["IID"][group_df["GROUP"] == test].values
+    total = len(group_df)
+
+    with open(ped_file, "r") as pfile:
+        for indiv in pfile.readlines():
+            indiv = indiv.strip("\n")
+            indiv_split = indiv.split(" ")
+            fid = indiv_split[0]
+            iid = indiv_split[1]
+            mid = indiv_split[2]
+            pid = indiv_split[3]
+            gender = indiv_split[4]
+            phen = indiv_split[5]
+            alleles = indiv_split[6:]
+            genos = ["".join([alleles[i],
+                              alleles[i+1]]) for i in range(0, len(alleles), 2)]
+
+            # check for ref and test conditions
+            # ignore individuals in neither camp
+            if iid in test_ids:
+                tcount += 1
+                # get genotype counts
+                for i in range(len(genos)):
+                    # missing genotypes are coded '00' in plink format
+                    if genos[i] == "00":
+                        pass
+                    elif genos[i] == "11":
+                        test_homA1[i, i] += 1
+                    elif genos[i] == "12":
+                        test_het[i, i] += 1
+                    else:
+                        test_homA2[i, i] += 1
+
+            elif iid in ref_ids:
+                rcount += 1
+                # get genotype counts
+                for i in range(len(genos)):
+                    # missing genotypes are coded '00' in plink format
+                    if genos[i] == "00":
+                        pass
+                    elif genos[i] == "11":
+                        ref_homA1[i, i] += 1
+                    elif genos[i] == "12":
+                        ref_het[i, i] += 1
+                    else:
+                        ref_homA2[i, i] += 1
+            else:
+                ncount += 1
+                if round((tcount + rcount + ncount)/total, 2) == 0.25:
+                    E.info("%i samples counted."
+                           "Approximately 25% samples counted" % tcount + rcount + ncount)
+                elif round((tcount + rcount + ncount)/total, 2) == 0.50:
+                    E.info("%i samples counted."
+                           "Approximately 50% samples counted" % tcount + rcount + ncount)
+                elif round((tcount + rcount + ncount)/total, 2) == 0.75:
+                    E.info("%i samples counted."
+                           "Approximately 75% samples counted" % tcount + rcount + ncount)
+
+                
+    E.info("Counted alleles for %i test cases, %i ref cases,"
+           " %i neither reference nor test." % (tcount, rcount,
+                                                ncount))
+
+    ref_allele_counts = ((2 * ref_homA2) + ref_het)/float(2 * rcount)
+    test_allele_counts = ((2 * test_homA2) + test_het)/float(2 * tcount)
+
+    ref_mafs = 1 - ref_allele_counts.diagonal()
+    test_mafs = 1 - ref_allele_counts.diagonal()
+  
+    ref_maf_df = pd.DataFrame(zip(variant_ids, ref_mafs), 
+                              columns=["SNP", "ref_MAF"],
+                              index=[x for x,y in enumerate(variant_ids)])
+    ref_maf_df["ref_A2_HOMS"] = (2 * ref_homA1).diagonal()
+    ref_maf_df["ref_A2_HETS"] = ref_het.diagonal()
+    ref_maf_df.index = ref_maf_df["SNP"]
+    ref_maf_df.drop(["SNP"], axis=1, inplace=True)
+
+    test_maf_df = pd.DataFrame(zip(variant_ids, test_mafs), 
+                               columns=["SNP", "test_MAF"],
+                               index=[x for x,y in enumerate(variant_ids)])
+    test_maf_df["test_A2_HOMS"] = (2 * test_homA1).diagonal()
+    test_maf_df["test_A2_HETS"] = test_het.diagonal()
+    test_maf_df.index = test_maf_df["SNP"]
+    test_maf_df.drop(["SNP"], axis=1, inplace=True)
+
+    freq_diffs = pd.merge(ref_maf_df, test_maf_df,
+                         left_index=True, right_index=True,
+                         how='inner')
+    
+    freq_diffs["MAF_diff"] = freq_diffs["ref_MAF"] - freq_diffs["test_MAF"]
+
+    E.info("allele frequencies calculated over %i SNPs and "
+           "%i individuals" % (len(genos), tcount + rcount))
+
+    return freq_diffs
 
 
 def calcPenetrance(ped_file, map_file, mafs=None,
@@ -3053,6 +3397,33 @@ def flagGender(gender_file, plot=True, plot_path=None):
     return discords
 
 
+def _compare_ibds(ibd_entry, threshold=0.03125):
+    '''
+    Just for internal use in `flagRelated` function.
+    To compare IBD estimates and flag up related
+    individuals
+
+    Arguments
+    ---------
+    ibd_entry: pandas.Core.Series
+      a single line entry from an IBD estimates
+      file
+
+    threshold: float
+      the threshold at which to flag an individual as related
+
+    Returns
+    -------
+    flag: boolean
+      True if related, else false
+    '''
+
+    if ibd_entry["PI_HAT"] < threshold:
+        return False
+    else:
+        return True
+
+
 def flagRelated(ibd_file, chunk_size=None, 
                 threshold=0.03125, plot=True,
                 plotting_path=None):
@@ -3092,23 +3463,57 @@ def flagRelated(ibd_file, chunk_size=None,
       relationship to another individual.
     '''
 
+    # need to make this faster
+    # sequentially add new IDs only
     related_list = []
-
+    ibds = []
     if ibd_file.endswith("gz"):
         comp = "gzip"
     else:
         pass
-
+    
+    E.info("reading file in chunks of %i lines" % chunk_size)
     if chunk_size:
         # read in and operate on chunks
         df_iter = pd.read_table(ibd_file, header=0, index_col=None,
-                                sep="\t", compression=comp,
+                                delim_whitespace=True, compression=comp,
                                 chunksize=chunk_size)
-
+        count = 0
         for chunk in df_iter:
-            related = chunk["PI_HAT"]
+            count += 1
+            entrys = chunk[["FID1", "IID1", 
+                           "FID2", "IID2",
+                           "PI_HAT"]]
+            ibds.append(entrys)
+            relate_mask = entrys.apply(_compare_ibds, axis=1)
+            related = entrys[relate_mask]
+            E.info("%i relations found" % len(related))
+            related_list.append(related)
     else:
         pass
+    
+    df = pd.concat(ibds, axis=0, keys=None)
+
+    if plot:
+        # for lots of observations, plot log counts
+        E.info("plotting pair-wise IBD distribution")
+        py2ri.activate()
+        r_df = py2ri.py2ri_pandasdataframe(df)
+        R.assign("relate.df", r_df)
+        R('''suppressPackageStartupMessages(library(ggplot2))''')
+        R('''p <- ggplot(relate.df, aes(PI_HAT+0.5)) + '''
+          '''geom_histogram(binwidth=0.01) + '''
+          '''labs(title="Proportion of IBD shared distribution") +  '''
+          '''theme_bw() + scale_y_log10() + '''
+          '''geom_vline(xintercept=%(threshold)f, '''
+          '''linetype=4, colour="#838B83")''' % locals())
+        R('''png("%s/IBD-hist.png")''' % plotting_path)
+        R('''print(p)''')
+        R('''dev.off()''')        
+    else:
+        pass
+
+    return related_list
 
 
 def flagInbred(inbred_file, inbreeding_coefficient,
@@ -3173,3 +3578,107 @@ def flagInbred(inbred_file, inbreeding_coefficient,
         pass
 
     return inbreds
+
+
+def mergeQcExclusions(hets_file=None, inbred_file=None,
+                      related_file=None, gender_file=None,
+                      mask_file=None):
+    '''
+    Merge sets of excluded individuals into a single file for
+    downstream analysis, processing, etc
+
+    Arguments
+    ---------
+    hets_file: string
+      file containing individuals to remove due to excessive or
+      reduced heterozygosity
+
+    inbred_file: string
+      file of individuals highly related to themselves for
+      exclusion
+
+    related_file: string
+      file of IDs of individuals pruned due to greater relatedness
+      than an arbitrary threshold
+
+    gender_file: string
+      individuals with discordant reported vs. genetic gender
+
+    mask_file: string
+      individuals to be excluded from analyses, unrelated
+      for reasons to QC (i.e. mask out category of individuals)
+
+    Returns
+    -------
+    exclusions: pandas.Core.DataFrame
+      A dataframe of FID and IIDs of the unique set of excluded
+      individuals
+    '''
+
+    if hets_file:
+        hets_df = pd.read_table(hets_file, sep="\t",
+                                header=0, index_col=None)
+        E.info("%i exclusions due to "
+               "heterozygosity deviation" % len(hets_df))
+    else:
+        hets_df = None
+        E.warn("No heterozygosity exclusion file")
+    if inbred_file:
+        inbred_df = pd.read_table(inbred_file, sep="\t",
+                                  header=0, index_col=None)
+        E.info("%i exclusions due "
+               "to consanguinuity" % len(inbred_df))
+    else:
+        inbred_df = None
+        E.warn("No inbred exclusions")
+
+    if related_file:
+        related_df = pd.read_table(related_file, delim_whitespace=True,
+                                   header=None, index_col=None)
+        related_df.columns = ["FID", "IID"]
+        E.info("%i individuals excluded due "
+               "to high relatedness" % len(related_df))
+    else:
+        related_df = None
+        E.warn("No individuals excluded on relatedness")
+                                
+    if gender_file:
+        gender_df = pd.read_table(gender_file, sep="\t",
+                                  header=0, index_col=None)
+        E.info("%i individuals with discordant "
+               "gender recorded" % len(gender_df))
+    else:
+        gender_df = None
+        E.warn("No individuals exclued with "
+               "discordant gender")
+
+    if mask_file:
+        mask_df = pd.read_table(mask_file, sep="\t",
+                                header=None, index_col=None)
+        E.info("%i individuals to be excluded "
+               "for additional reasons" % len(gender_df))
+        mask_df.columns = ["FID", "IID"]
+    else:
+        mask_df = None
+
+    df_list = [hets_df, inbred_df, related_df, gender_df,
+               mask_df]
+
+    df_true = [True for x in df_list if x is not False]
+
+    if not all(df_true):
+        raise ValueError("no QC files detected - do some QC!!")
+    else:
+        pass
+        
+    # assume all df have FID and IID columns
+    real_df = [x for x in df_list if x is not None]
+    real_df = [x[["FID", "IID"]] for x in real_df]
+    
+    full_df = pd.concat(real_df, keys=None, axis=0)
+    exclusions = full_df.drop_duplicates(subset=["FID",
+                                                 "IID"],
+                                         take_last=True,
+                                         inplace=False)
+
+    return exclusions

@@ -88,9 +88,10 @@ def main(argv=None):
     else:
         pass
 
-    if df.any():
-        df.to_csv(options.stdout, sep="\t")
-    else:
+    # only output appended results for Manhattan plot, not qqplot
+    try:
+        df.to_csv(options.stdout, sep="\t", index=False, index_col=None)
+    except UnboundLocalError:
         pass
 
     # write footer and output benchmark information.
