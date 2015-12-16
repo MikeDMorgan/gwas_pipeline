@@ -60,7 +60,7 @@ def main(argv=None):
     parser.add_option("--task", dest="task", type="choice",
                       choices=["set_factors", "dichotimise_phenotype",
                                "plink_format", "select_ethnicity",
-                               "merge_covariates"],
+                               "merge_covariates", "subset_phenotypes"],
                       help="task to execute on phenotype file(s)")
 
     parser.add_option("--R-script", dest="r_script", type="string",
@@ -88,6 +88,10 @@ def main(argv=None):
     parser.add_option("--covariate-file", dest="covar_file", type="string",
                       help="a comma-separated list of files to be merged, or "
                       "a single file")
+
+    parser.add_option("--fam-file", dest="fam_file", type="string",
+                      help="Plink .fam file that specifies which samples "
+                      "to subset from the phenotypes file")
 
     # add common options (-h/--help, ...) and parse command line
     (options, args) = E.Start(parser, argv=argv)
@@ -162,6 +166,7 @@ def main(argv=None):
         filter_df.index = filter_df["FID"]
         filter_df.drop(labels="FID", axis=1, inplace=True)
         filter_df.to_csv(options.stdout, sep="\t", index_col=None)
+
     elif options.task == "merge_covariates":
         if len(options.covar_file.split(",")) > 1:
             filelist = options.covar_file.split(",")
@@ -179,6 +184,20 @@ def main(argv=None):
         else:
             E.warn("only a single covariates file provided."
                    "No merging possible, exiting")
+
+    elif options.task == "subset_phenotypes":
+        fam_df = pd.read_table(options.fam_file, sep=None,
+                               index_col=None, header=None)
+        fam_df.columns = ["FID", "IID", "PAT", "MAT", "SEX",
+                          "PHENO"]
+
+        pheno_df = pd.read_table(infile, sep=None,
+                                 index_col=0, header=0)
+        fam_ids = fam_df["FID"]
+        sub_pheno = pheno_df.loc[fam_ids]
+    
+        sub_pheno.to_csv(options.stdout, index_col=0,
+                         index_label="FID", sep="\t")
     else:
         pass
         

@@ -9,6 +9,7 @@ import CGAT.Experiment as E
 import CGATPipelines.Pipeline as P
 import numpy as np
 import pandas as pd
+import pandas.io.sql as pdsql
 import re
 import random
 import os
@@ -23,6 +24,9 @@ import matplotlib
 import matplotlib.pyplot as plt
 from ggplot import *
 import collections
+import sqlite3 as sql
+from math import *
+
 
 class FileGroup(object):
     '''
@@ -212,7 +216,7 @@ class FileGroup(object):
         elif self.file_format == "GRM_binary":
             self.id_file = [ig for ig in infiles if re.search(".grm.id",
                                                               ig)][0]
-            self.n_file = [gn for gn in infiles if re.search(".grm.N",
+            self.n_file = [gn for gn in infiles if re.search(".grm.N.bin",
                                                              gn)][0]
             self.bin_file = [gb for gb in infiles if re.search(".grm.bin",
                                                                gb)][0]
@@ -230,8 +234,8 @@ class FileGroup(object):
             try:
                 assert self.bin_file
             except AssertionError:
-                raise ValueError("GRM binary file is missing, please "
-                                 "specify")
+                VaueError("GRM genotype is missing, please "
+                          "specify")
 
         elif self.file_format == "GRM_plink":
             self.id_file = [ig for ig in infiles if re.search(".rel.id",
@@ -544,12 +548,65 @@ class GCTA(GWASProgram):
         try:
             statement.append(" --grm %s " % grm)
         except ValueError:
-            E.warn("No GRM has been provided, the GRM "
-                   "will be computed for each chromosome."
-                   "Beware this may be VERY slow")
+            E.warn("No GRM has been provided, the GRM ")
 
         self.statement["mlm"] = " ".join(statement)
 
+    def reml_analysis(self, method, parameters, prevalence=None,
+                      qcovariates=None, discrete_covar=None):
+        '''
+        Use REML to estimate the proportion of phenotypic variance
+        explained by the estimated genetic relationship between
+        individuals.
+
+        Arguments
+        ---------
+        method: string
+          GCTA method to use for REML estimation of h2.  Includes:
+          * snpBLUP - calculate the SNP BLUPs from the genotype
+            data and the estimated total genetic value/ breeding value
+          * fixed_cor - 
+          * priors - provide initial priors for the variance components
+            estimation
+          * unconstrained - allow variance estimates to fall outside
+            of the normal parameter space, bounded [0, ).
+          * GxE - estimate the contribution of GxE with covariates
+            to the phenotype variance
+          * BLUP_EBV - output individual total genetic effect/breeding
+            values
+
+        '''
+
+        statement = []
+
+        try:
+            params = parameters.split(",")
+            if len(params) == 1:
+                params = params[0]
+            else:
+                pass
+        except AttributeError:
+            params = parameters
+
+        self._run_tasks(parameter=params,
+                        greml=method)
+
+        if prevalence:
+            statement.append(" --prevalence %0.3f " % prevalence)
+        else:
+            pass
+
+        if qcovariates:
+            statement.append(" --qcovar %s " % qcovariates)
+        else:
+            pass
+
+        if discrete_covar:
+            statement.append(" --covar %s " % discrete_covar)
+        else:
+            pass
+
+        self.statement["reml"] = " ".join(statement)
 
     def _run_tasks(self, parameter=None, **kwargs):
         '''
@@ -591,7 +648,7 @@ class GCTA(GWASProgram):
                               "GxE": " --reml --gxe %s ",
                               "LRT": " --reml --reml-lrt %s ",
                               "BLUP_EBV": " --reml --reml-pred-rand ",
-                              "snpBLUP": " --blup-snp "},
+                              "snpBLUP": " --blup-snp %s "},
                     "estimate_ld": " --ld %s ",
                     "simulate_gwas": {"quantitative": " --simu-qt ",
                                       "case_control": " --simu-cc %s %s "},
@@ -722,6 +779,11 @@ class GCTA(GWASProgram):
 
         try:
             statement.append(self.statement["mlm"])
+        except KeyError:
+            pass
+
+        try:
+            statement.append(self.statement["reml"])
         except KeyError:
             pass
 
@@ -996,7 +1058,7 @@ class Plink2(GWASProgram):
                                                           infiles.bim_file,
                                                           infiles.fam_file)
         elif file_format == "vcf":
-            statement = " --vcf %s " % infiles.vcf_file
+            statement = " --vcf %s.vcf.gz " % infiles.vcf_file
         elif file_format == "bcf":
             statement = " --bcf %s " % infiles.vcf_file
         elif file_format == "GRM_binary":
@@ -1025,6 +1087,8 @@ class Plink2(GWASProgram):
             statement = " --grm.bin  %s " %infiles.name
         elif file_format == "GRM_binary":
             statement = " --grm-bin %s " % infiles.name
+        elif file_format == "vcf":
+            statement = " --vcf %s.vcf.gz " % infiles.name
         else:
             raise AttributeError("file format is not defined or recognised."
                                  "Please define the input corectly when "
@@ -1239,6 +1303,53 @@ class Plink2(GWASProgram):
                 
         self.filters.append(" ".join(filters))
         self.statement["filters"] = " ".join(self.filters)
+
+    def calc_ld(self, ld_statistic, ld_threshold,
+                ld_shape="table"):
+        '''
+        Calculate linkage disequilibrium between all SNP
+        pairs.
+
+        Arguments
+        ---------
+        ld_statistic: string
+          The LD statistic to report, either correlation or squared correlation
+          of inter-variant allele counts
+
+        ld_threshold: float
+          minimum value to report for pair-wise LD
+
+        ld_window: int
+          max distance (in Kb) between SNPs for calculating LD
+
+        ld_shape: string
+          shape to use for reporting LD, either a table or a matrix.  If a
+          matrix then either square, square with diagnonal (square0) or
+          triangular.  Square matrices are symmetric.
+        '''
+
+        statement = []
+        ld_map = {"r": " --r %s ",
+                  "r2": "--r2 %s "}
+
+        shape_map = {"table":  "inter-chr gz",
+                     "square": "square gz",
+                     "square0": "square0 gz",
+                     "triangle": "triangle gz"}
+
+        try:
+            statement.append(ld_map[ld_statistic] % shape_map[ld_shape])
+        except KeyError:
+            raise ValueError("%s LD statistic not recognised. Please "
+                             "use eithr 'r' or 'r2'" % ld_statistic)
+
+        if type(ld_threshold) == float:
+            statement.append(" --ld-window-r2 %0.3f " % ld_threshold)
+        else:
+            E.warn("threshold type not recognised, setting to default "
+                   "value of 0.2")
+
+        self.statement["tasks"] = " ".join(statement)
 
     def _run_tasks(self, parameter=None, **kwargs):
         '''
@@ -2063,8 +2174,7 @@ class GWASResults(object):
 
     def get_results(self, association_file):
         '''
-        Parse a GWA results file and assign the table
-        as an attribute.
+        Parse a GWA results file and retunr the table
         '''
 
         # use Pandas for now - try something different later
@@ -2075,9 +2185,17 @@ class GWASResults(object):
         # i.e. BP = int, P = float, SNP = str, etc
 
         l_count = 0
+        E.info("parsing file: %s" % association_file)
         with open(association_file, "r") as ifile:
             for line in ifile:
-                parsed = line.split(" ")
+                # check if spacing is whitespace or tab
+                if len(line.split(" ")) > 1:
+                    parsed = line.split(" ")
+                elif len(line.split("\t")) > 1:
+                    parsed = line.split("\t")
+                else:
+                    raise IOError("file separator not recognised. "
+                                  "Must be whitespace or tab")
                 # remove multiple blank spaces
                 for i in range(parsed.count('')):
                     parsed.remove('')
@@ -2087,7 +2205,7 @@ class GWASResults(object):
                 except ValueError:
                     parsed = [(px).rstrip("\n") for px in parsed]
                 if l_count == 0:
-                    header = [iy for ix, iy in enumerate(parsed)]
+                    header = [iy.upper() for ix, iy in enumerate(parsed)]
                     head_idx = [ix for ix, iy in enumerate(parsed)]
                     map_dict = dict(zip(head_idx, header))
                     res_dict = dict(zip(header, [[] for each in header]))
@@ -2102,7 +2220,6 @@ class GWASResults(object):
         # substract one from the index for the header column
         df_idx = range(l_count-1)
 
-        print association_file
         results_frame = pd.DataFrame(res_dict, index=df_idx)
         results_frame.fillna(value=1.0, inplace=True)
         try:
@@ -2110,7 +2227,6 @@ class GWASResults(object):
         except KeyError:
             pass
 
-        print results_frame.head()
         # need to handle NA as strings
         results_frame["P"][results_frame["P"] == "NA"] = 1.0
 
@@ -2124,18 +2240,27 @@ class GWASResults(object):
                 results_frame["CHISQ"][results_frame["CHISQ"] == "NA"] = 1.0
                 results_frame["CHISQ"] = [np.float64(sx) for sx in results_frame["CHISQ"]]
             except KeyError:
-                results_frame["T"][results_frame["T"] == "NA"] = 1.0
-                results_frame["T"] = [np.float64(sx) for sx in results_frame["T"]]
+                try:
+                    results_frame["T"][results_frame["T"] == "NA"] = 1.0
+                    results_frame["T"] = [np.float64(sx) for sx in results_frame["T"]]
+                except KeyError:
+                    pass
 
         try:
-            results_frame["F_U"][results_frame["F_U"] == "NA"] = 1.0
+            results_frame["F_U"][results_frame["F_U"] == "NA"] = 0.0
             results_frame["F_U"] = [np.float64(ux) for ux in results_frame["F_U"]]
         except KeyError:
             pass
 
         try:
-            results_frame["F_A"][results_frame["F_A"] == "NA"] = 1.0
+            results_frame["F_A"][results_frame["F_A"] == "NA"] = 0.0
             results_frame["F_A"] = [np.float64(ax) for ax in results_frame["F_A"]]
+        except KeyError:
+            pass
+
+        try:
+            results_frame["FREQ"][results_frame["FREQ"] == "NA"] = 0.0
+            results_frame["FREQ"] = [np.float64(fx) for fx in results_frame["FREQ"]]
         except KeyError:
             pass
 
@@ -2143,8 +2268,12 @@ class GWASResults(object):
             results_frame["OR"][results_frame["OR"] == "NA"] = 1.0
             results_frame["OR"] = [np.float64(ox) for ox in results_frame["OR"]]
         except KeyError:
-            results_frame["BETA"][results_frame["BETA"] == "NA"] = 1.0
-            results_frame["BETA"] = [np.float64(ox) for ox in results_frame["BETA"]]
+            try:
+                results_frame["BETA"][results_frame["BETA"] == "NA"] = 1.0
+                results_frame["BETA"] = [np.float64(ox) for ox in results_frame["BETA"]]
+            except KeyError:
+                results_frame["B"][results_frame["B"] == "NA"] = 0.0
+                results_frame["B"] = [np.float64(ox) for ox in results_frame["B"]]              
 
         return results_frame
 
@@ -2207,6 +2336,18 @@ class GWASResults(object):
         R('''qq(assoc.df$P)''')
         R('''dev.off()''')
 
+    def getHits(self, threshold):
+        '''
+        Pull out regions of association by selecting
+        all SNPs with association p-values less than
+        a certain threshold.  Defaults is genome-wide
+        signifance, p < 1x10-8.
+        '''
+
+        hits_df = self.results[self.results["P"] <= threshold]
+
+        hit_snps = set(hits_df["SNP"].values)
+        return hit_snps
 
 
 ##########################################################
@@ -2221,7 +2362,7 @@ def plotMapPhenotype(data, coords, coord_id_col, lat_col,
     '''
     
     # merge co-ordinate data with phenotype data
-    merged_df = pd.merge(left=coords, right=data, left_on="f.eid",
+    merged_df = pd.merge(left=coords, right=data, left_on=coord_id_col,
                          right_on=coord_id_col, how='inner')
 
     # pheno column and set level of categorical variable
@@ -2280,7 +2421,7 @@ def plotMapPhenotype(data, coords, coord_id_col, lat_col,
         R('''points((pheno.df[,"%(long_col)s"])[pheno.df$dichot_var == 0], '''
           '''(pheno.df[,"%(lat_col)s"])[pheno.df$dichot_var == 0], pch=".", col=black)''' % locals())
 
-        R('''points((pheno.df[,"%(long_col)s"])[pheno.df$dichot_var == 1], '''
+        R('''points((-pheno.df[,"%(long_col)s"])[pheno.df$dichot_var == 1], '''
           '''(pheno.df[,"%(lat_col)s"])[pheno.df$dichot_var == 1], pch=".", col=red)''' % locals())
 
         R('''legend('topleft', legend=c("not-%(level)s", "%(level)s"),'''
@@ -3682,3 +3823,245 @@ def mergeQcExclusions(hets_file=None, inbred_file=None,
                                          inplace=False)
 
     return exclusions
+
+
+def selectLdFromDB(database, table_name,
+                   index_snp,
+                   index_label=None):
+    '''
+    Select LD values from an SQL table over
+    a specific range.  Large regions will consume
+    large memory and queries may take several
+    minutes to complete.
+
+    Arguments
+    ---------
+    database: sql.connection
+      An SQL database connection to the DB
+      containing the LD values
+
+    table_name: string
+      The table to query containing LD information
+
+    index_snp: string
+      SNP ID to select LD values from the SQL 
+      database on
+
+    index_label: str
+      Column label in SQL database to use as the
+      index in the output dataframe
+
+    Returns
+    -------
+    ld_df: pandas.Core.DataFrame
+      Pandas dataframe containing LD values over
+      target range.
+    '''
+
+    # UTF-8 codec struggles to decode ';' in some columns
+    database.text_factory = str
+
+    state = '''
+    select SNP_A,SNP_B,R2 FROM %s where SNP_B = "%s";
+    ''' % (table_name, index_snp)
+
+    ld_df = pdsql.read_sql(sql=state, con=database,
+                           index_col=index_label)
+
+    return ld_df    
+
+
+def calcLdScores(ld_table, snps,
+                 scale=False):
+    '''
+    Calculate the LD scores for SNPs across a chromosome,
+    stored in a SQL database.
+
+    Arguments
+    ---------
+    ld_table: pandas.Core.DataFrame
+      Pandas dataframe in table format containing LD
+      values between SNPs.  Columns are `SNP_A`, `SNP_B`
+      and `R2`.
+
+    snps: list
+      the snps over which to calculate LD scores
+
+    scale: bool
+      Whether to scale LD score by the number of SNPs
+      used to calculate the score.  Useful if used
+      as a weighting for other SNP scores.
+
+    Returns
+    -------
+    ld_scores: pandas.Core.Series
+      LD scores for each SNP
+    '''
+
+    ld_scores = {}
+    for snp in snps:
+        if len(ld_table) > 0:
+            ld_score = sum(ld_table["R2"])
+        else:
+            ld_score = 0
+
+        if scale:
+            ld_scores[snp] = ld_score/len(ld_table)
+        else:
+            ld_scores[snp] = ld_score
+
+    return pd.Series(ld_scores)
+
+
+def calcWeightedEffects(gwas_results, snps, calc_se=True,
+                        scale=False):
+    '''
+    Calculate the standard error weighted effect sizes score
+    for each SNP:
+    score = sum(ln(OR) * se)
+
+    Arguments
+    ---------
+    gwas_results: pandas.Core.DataFrame
+      A dataframe of the results from a genome_wide association
+      study. Assumes SNP IDs are the index column.
+
+    snps: list
+      the snps over which to calculate the total weighted
+      effect size score.
+
+    calc_se: boolean
+      Calculate the standard error from the p-values and
+      effect sizes:
+
+      SE = ln(OR)/Z
+      Z = -0.862 + sqrt(0.743 - 2.404 * ln(P))
+
+    scale: boolean
+      Scale the sum of standard error weighted effect sizes
+      by the number of SNPs
+
+    Returns
+    -------
+    es_score: float
+      sum of SE weighted effect sizes
+    '''
+
+    # calculate standard error of effect size based on
+    # p-value and effect size
+
+    if calc_se:
+        # check p-values that = 0 are set to smallest floating
+        # point representation instead
+        gwas_results["P"][gwas_results["P"] == 0] = np.finfo(np.float64).min
+        z_func = lambda x: - 0.862 + sqrt(0.743 - 2.404 * np.log(x))
+        gwas_results["Z"] = gwas_results["P"].apply(z_func)
+        gwas_results["SE"] = abs(np.log(gwas_results["OR"])/gwas_results["Z"])
+    else:
+        E.warn("Standard errors have not been calculated, please "
+               "make sure they exist in this results table")
+
+    es_score = sum((abs(np.log(gwas_results["OR"])) * gwas_results["SE"]).fillna(0))
+
+    if scale and len(gwas_results):
+        return es_score/len(gwas_results)
+    else:
+        return es_score
+
+
+def snpPriorityScore(gwas_results, database, table_name,
+                     chromosome, clean=True):
+    '''
+    Generate SNP scores based on the amount of genetic variation
+    they capture and the sum of the weighted effect sizes for
+    the trait of interest.
+
+    This score can then be integrated with a score based on
+    the overlap with functional annotation features
+    of interest.
+
+    Arguments
+    ---------
+    gwas_results: string
+      Results from a GWAS, assumed to be in Plink format.
+
+    database: string
+      Path to an SQL database containing LD values in
+      table format
+
+    table_name: string
+      Specific table, often referring to a specific
+      chromosome, that contains LD values with columns
+      SNP_A, SNP_B, BP_A, BP_B and R2.
+
+    chromosome: string
+      A chromosome to select from the gwas_results
+      file.
+
+    clean: boolean
+      Whether the results table has been pre-cleaned to
+      remove results not relevant to SNPs. e.g. if
+      covariates had been included in the regression
+      model these should be removed.
+
+    Returns
+    -------
+    SNP_scores: pd.Core.DataFrame
+      A pandas dataframe of LDscores, weight effect size
+      scores and SNP priority score.
+    '''
+
+    gwas_df = pd.read_table(gwas_results, index_col=None,
+                            sep=None, header=0)
+    if clean:
+        pass
+    else:
+        gwas_df = gwas_df[gwas_df["TEST"] == "ADD"]
+
+    gwas_df.index = gwas_df["SNP"]
+
+    # in order to reduce the computational load it is
+    # necessary to break up the SNPs into regions.
+    # The logical way would be to use recombination
+    # hotspots, however, this will still leave
+    # some very large windows
+    # Use a moving window over the chromosome of
+    # ~250Kb, with 25kb overlap.
+
+    chr_df = gwas_df[gwas_df["CHR"] == int(chromosome)]
+
+    priority_list = []
+    ld_scores = {}
+    es_scores = {}
+    priority_scores = {}
+
+    dbh = sql.connect(database)
+    snp_set = chr_df.index
+
+    # iterate over SNPs
+    for snp in snp_set:
+        ld_values = selectLdFromDB(dbh,
+                                   table_name=table_name,
+                                   index_snp=snp,
+                                   index_label="SNP_B")
+
+        ldsnps = ld_values["SNP_A"]
+
+        ldscore = calcLdScores(ld_table=ld_values,
+                               snps=snp_set,
+                               scale=False)
+        ld_scores[snp] = ldscore
+        
+        escore = calcWeightedEffects(gwas_results=chr_df.loc[ldsnps],
+                                     snps=ldsnps,
+                                     calc_se=True,
+                                     scale=True)
+        es_scores[snp] = escore
+
+        weight = escore * ldscore
+        priority_scores[snp] = weight
+
+    SNP_scores = pd.DataFrame([pd.Series(ld_scores),
+                               pd.Series(es_scores),
+                               pd.Series(priority_scores)]).T
+    return SNP_scores

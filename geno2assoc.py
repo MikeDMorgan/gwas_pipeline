@@ -88,9 +88,25 @@ def main(argv=None):
 
     parser.add_option("--method", dest="method", type="choice",
                       choices=["association", "summary", "format", "matrix",
-                               "reml", "pca", "lmm", "simulation",
-                               "epistasis"],
+                               "reml", "bivariate_reml", "pca", "lmm",
+                               "simulation", "epistasis", "ld"],
                       help="method to apply to genome-wide data")
+
+    parser.add_option("--reml-method", dest="reml_method", type="choice",
+                      choices=["standard", "priors", "reml_algorithm",
+                               "unconstrained", "GxE", "LRT", "BLUP_EBV",
+                               "snpBLUP", "no_residual", "fixed_cor"],
+                      help="method for REML estimate of heritability method "
+                      "including either single or dual phenotypes")
+
+    parser.add_option("--reml-parameters", dest="reml_param", type="string",
+                      help="comma separated list of parameters to pass to "
+                      "REML variance components analysis")
+
+    parser.add_option("--prevalence", dest="prevalence", type="float",
+                      help="binary trait prevalence in a cohort study. "
+                      "Used to estimate h2 on the liability threshold "
+                      "scale.")
 
     parser.add_option("--lmm-method", dest="lmm_method", type="choice",
                       choices=["standard", "loco", "no_covar"],
@@ -132,8 +148,7 @@ def main(argv=None):
 
     parser.add_option("--matrix-compression", dest="matrix_compress", type="choice",
                       choices=["gz", "bin", "bin4"],
-                      help="compression to apply to output matrix file",
-                      default="gz")
+                      help="compression to apply to output matrix")
 
     parser.add_option("--matrix-form", dest="matrix_form", type="choice",
                       choices=["distance", "grm"],
@@ -223,6 +238,25 @@ def main(argv=None):
     parser.add_option("--summary-parameter", dest="sum_param", type="string",
                       help="optional parameters that can be passed to summary "
                       "statistics methods")
+
+    parser.add_option("--ld-statistic", dest="ld_stat", type="choice",
+                      choices=["r", "r2"], help="compute either the raw "
+                      "inter variant allele count correlation, R, or the "
+                      "squared correlation, R^2")
+
+    parser.add_option("--ld-min", dest="ld_min", type="string",
+                      help="minimum value to report for pair-wise LD "
+                      "calculations.  Beware output files may be very "
+                      "large if `ld_min` is very small.")
+
+    parser.add_option("--ld-window", dest="ld_window", type="string",
+                      help="distance between SNPs, beyond which LD will "
+                      "not be calculated")
+
+    parser.add_option("--ld-format-output", dest="ld_shape", type="choice",
+                      choices=["square", "table", "triangle", "square0"],
+                      help="output either as table, or matrix format with a "
+                      "specific shape.")
 
     parser.add_option("--genotype-rate", dest="filt_genotype_rate", type="string",
                       help="genotyping rate threshold.  SNPs below this threshold "
@@ -370,7 +404,9 @@ def main(argv=None):
                         memory="60G",
                         parallel=None,
                         covariate_file=None,
-                        covar_col=None)
+                        covar_col=None,
+                        epi_report=0.001,
+                        epi_sig=0.001)
 
     if not options.infile_pattern:
         infiles = (argv[-1]).split(",")
@@ -437,6 +473,10 @@ def main(argv=None):
             pass
     elif options.method == "pca":
         gwas_object.PCA(n_pcs=options.num_pcs)
+    elif options.method == "ld":
+        gwas_object.calc_ld(ld_statistic=options.ld_stat,
+                            ld_threshold=float(options.ld_min),
+                            ld_shape=options.ld_shape)
     elif options.method == "association":
         gwas_object.run_association(association=options.assoc_method,
                                     permutation=options.permutation,
@@ -457,6 +497,12 @@ def main(argv=None):
                                          set_mode=options.set_method,
                                          report_threshold=float(options.epi_report),
                                          sig_threshold=float(options.epi_sig))
+    elif options.method == "reml":
+        gwas_object.reml_analysis(method=options.reml_method,
+                                  parameters=options.reml_param,
+                                  prevalence=options.prevalence,
+                                  qcovariates=options.covariate_file,
+                                  discrete_covar=options.covariate_discrete)
     elif options.method == "format":
         if options.format_method == "change_format":
             # adding filtering options to plink requires the --make-bed flag
