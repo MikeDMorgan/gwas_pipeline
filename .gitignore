@@ -4,3 +4,4 @@ dissect/*
 *pyc
 *~
 *.py#
+*/*~
