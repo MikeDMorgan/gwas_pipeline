@@ -60,6 +60,9 @@ def main(argv=None):
                       help="threshold for association p-value, below "
                       "which results will be output")
 
+    parser.add_option("--output-directory", dest="outdir", type="string",
+                      help="output file directory")
+
     # add common options (-h/--help, ...) and parse command line
     (options, args) = E.Start(parser, argv=argv)
 
@@ -75,8 +78,36 @@ def main(argv=None):
                       "results files as the last command line argument")
 
     if options.task == "get_hits":
-        for snp in results.getHits(float(options.p_threshold)):
-            options.stdout.write("%s\n" % snp)
+        hits = results.getHits(float(options.p_threshold))
+        regions = hits.groupby(["CHR"])
+        for name, region in regions:
+            try:
+                try:
+                    top_reg = region.sort_values(by="CHISQ",
+                                                 ascending=False)
+                    top_bp = top_reg.iloc[0]["BP"]
+                except KeyError:
+                    top_reg = region
+                    top_reg.loc[:, "STAT"] = abs(top_reg["STAT"])
+                    top_reg = top_reg.sort_values(by="STAT",
+                                                  ascending=False)
+                    top_bp = top_reg.iloc[0]["BP"]
+            except KeyError:
+                top_reg = region
+                top_reg.loc[:, "STAT"] = abs(top_reg["T"])
+                top_reg = top_reg.sort_values(by="T",
+                                              ascending=False)
+                top_bp = top_reg.iloc[0]["BP"]
+
+            outname = "_".join(["chr%s" % str(name),
+                                str(top_bp),
+                                "significant"])
+
+            outfile = outname + ".tsv"
+            out_file = "/".join([options.outdir, outfile])
+            E.info("output association results from Chr%s to %s" %
+                   (str(name), out_file))
+            region.to_csv(out_file, sep="\t", index=None)
     else:
         pass
 

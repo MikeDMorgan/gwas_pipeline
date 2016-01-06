@@ -89,7 +89,8 @@ def main(argv=None):
     parser.add_option("--method", dest="method", type="choice",
                       choices=["association", "summary", "format", "matrix",
                                "reml", "bivariate_reml", "pca", "lmm",
-                               "simulation", "epistasis", "ld"],
+                               "simulation", "epistasis", "ld",
+                               "estimate_haplotypes"],
                       help="method to apply to genome-wide data")
 
     parser.add_option("--reml-method", dest="reml_method", type="choice",
@@ -238,6 +239,14 @@ def main(argv=None):
     parser.add_option("--summary-parameter", dest="sum_param", type="string",
                       help="optional parameters that can be passed to summary "
                       "statistics methods")
+
+    parser.add_option("--haplotype-frequency", dest="filt_haplotype_frequency",
+                      type="string", help="min allele frequency for SNPs to be "
+                      "considered for a haplotype")
+
+    parser.add_option("--haplotype-size", dest="filt_haplotype_size",
+                      type="string", help="maximum genomic size of "
+                      "haplotypes")                      
 
     parser.add_option("--ld-statistic", dest="ld_stat", type="choice",
                       choices=["r", "r2"], help="compute either the raw "
@@ -484,6 +493,8 @@ def main(argv=None):
                                     random_seed=options.random_seed,
                                     covariates_file=options.covariate_file,
                                     covariates=options.covar_col)
+    elif options.method == "estimate_haplotypes":
+        gwas_object._run_tasks(estimate_haplotypes="haplotype")
     elif options.method == "lmm":
         print options.lmm_method
         gwas_object.mixed_model(lmm_method=options.lmm_method,
