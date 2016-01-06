@@ -26,7 +26,7 @@ from ggplot import *
 import collections
 import sqlite3 as sql
 from math import *
-
+import scipy.stats as stats
 
 class FileGroup(object):
     '''
@@ -1203,7 +1203,9 @@ class Plink2(GWASProgram):
                       "covariate_filter": " %s ",
                       "covariate_column": " --mfilter %s ",
                       "missing_phenotype": " --prune ",
-                      "conditional_snp": " --condition %s "}
+                      "conditional_snp": " --condition %s ",
+                      "haplotype_size": " --blocks-max-kb %s ",
+                      "haplotype_frequency": " --blocks-min-maf %s "}
 
         # compile all filters together, checking for dependencies.
         # use a mapping dictionary to extract the relevant flags and
@@ -1390,6 +1392,8 @@ class Plink2(GWASProgram):
           a threshold.  Recommended minimum is 3rd cousins (IBS >= 0.03125).
         * check_gender - check imputed gender from non-pseudoautosomal X
           chromsome genotypes against self-reported gender
+        * estimate_haplotypes - assign SNPs to haplotype blocks and get
+          positional information
         '''
 
         statement = []
@@ -1438,8 +1442,8 @@ class Plink2(GWASProgram):
                                         "suppress_first": " --list-duplicate-vars suppress-first"},
                     "remove_relations": {"cutoff": " --rel-cutoff %s "},
                     "check_gender": " --check-sex ",
-                    "pca": " --pca %s "}
-
+                    "pca": " --pca %s ",
+                    "estimate_haplotypes": " --blocks "}
 
         for task, value in kwargs.iteritems():
             # check for PCA first as it is not nested in task_map
@@ -1451,6 +1455,8 @@ class Plink2(GWASProgram):
                     statement.append(task_map[task])
                 statement.append
             elif task == "check_gender":
+                statement.append(task_map[task])
+            elif task == "estimate_haplotypes":
                 statement.append(task_map[task])
             elif task != "parameter":
                 try:
@@ -2174,7 +2180,7 @@ class GWASResults(object):
 
     def get_results(self, association_file):
         '''
-        Parse a GWA results file and retunr the table
+        Parse a GWA results file and return the table
         '''
 
         # use Pandas for now - try something different later
@@ -2183,6 +2189,27 @@ class GWASResults(object):
         # fields means Pandas parsing breaks down
         # fields need to be the correct data type,
         # i.e. BP = int, P = float, SNP = str, etc
+        # if the file has already been parsed and processed
+        # just assign it instead
+
+        try:
+            peek = pd.read_table(association_file, nrows=5,
+                                 sep="\s*", header=0,
+                                 index_col=None,
+                                 engine='python')
+        except StopIteration:
+            peek = pd.read_table(association_file, nrows=5,
+                                 sep="\t", header=0,
+                                 index_col=None)
+        
+        try:
+            assert peek["log10P"].any()
+            results_frame = pd.read_table(association_file,
+                                          sep="\t", header=0,
+                                          index_col=None)
+            return results_frame
+        except KeyError:
+            pass
 
         l_count = 0
         E.info("parsing file: %s" % association_file)
@@ -2342,12 +2369,26 @@ class GWASResults(object):
         all SNPs with association p-values less than
         a certain threshold.  Defaults is genome-wide
         signifance, p < 1x10-8.
+        Then select region +/- 0.5Mb of the index SNP.
         '''
 
         hits_df = self.results[self.results["P"] <= threshold]
+        try:
+            try:
+                hits_df["STAT"] = abs(hits_df["STAT"])
+                hits_df.sort_values(by="STAT", inplace=True)
+            except KeyError:
+                hits_df["T"] = abs(hits_df["T"])
+                hits_df.sort_values(by="STAT", inplace=True)
+        except KeyError:
+            hits_df.sort_values(by="CHISQ", inplace=True)
+                
+        index_bp = hits_df.iloc[0]["BP"]
+        hits_df.index = hits_df["BP"]
 
-        hit_snps = set(hits_df["SNP"].values)
-        return hit_snps
+        range_df = hits_df.loc[index_bp - 500000 : indexbp + 500000]
+
+        return range_df
 
 
 ##########################################################
@@ -2418,11 +2459,11 @@ def plotMapPhenotype(data, coords, coord_id_col, lat_col,
         R('''png("%(save_path)s", width=540, height=540, res=90)''' % locals())
         R('''map(uk_map)''')
 
+        R('''points((-pheno.df[,"%(lat_col)s"])[pheno.df$dichot_var == 1], '''
+          '''(-pheno.df[,"%(long_col)s"])[pheno.df$dichot_var == 1], pch=".", col=red)''' % locals())
+
         R('''points((pheno.df[,"%(long_col)s"])[pheno.df$dichot_var == 0], '''
           '''(pheno.df[,"%(lat_col)s"])[pheno.df$dichot_var == 0], pch=".", col=black)''' % locals())
-
-        R('''points((-pheno.df[,"%(long_col)s"])[pheno.df$dichot_var == 1], '''
-          '''(pheno.df[,"%(lat_col)s"])[pheno.df$dichot_var == 1], pch=".", col=red)''' % locals())
 
         R('''legend('topleft', legend=c("not-%(level)s", "%(level)s"),'''
           '''fill=c("#000000", "#FF0000"))''' % locals())
@@ -3827,7 +3868,8 @@ def mergeQcExclusions(hets_file=None, inbred_file=None,
 
 def selectLdFromDB(database, table_name,
                    index_snp,
-                   index_label=None):
+                   index_label=None,
+                   ld_threshold=None):
     '''
     Select LD values from an SQL table over
     a specific range.  Large regions will consume
@@ -3861,9 +3903,16 @@ def selectLdFromDB(database, table_name,
     # UTF-8 codec struggles to decode ';' in some columns
     database.text_factory = str
 
-    state = '''
-    select SNP_A,SNP_B,R2 FROM %s where SNP_B = "%s";
-    ''' % (table_name, index_snp)
+    if ld_threshold:
+        state = '''
+        select SNP_A,SNP_B,R2 FROM %s where %s = "%s" AND
+        R2 > %0.3f;
+        ''' % (table_name, index_label,
+               index_snp, ld_threshold)
+    else:
+        state = '''
+        select SNP_A,SNP_B,R2 FROM %s where %s = "%s";
+        ''' % (table_name, index_label, index_snp)
 
     ld_df = pdsql.read_sql(sql=state, con=database,
                            index_col=index_label)
@@ -3894,23 +3943,21 @@ def calcLdScores(ld_table, snps,
 
     Returns
     -------
-    ld_scores: pandas.Core.Series
+    ld_scores: float
       LD scores for each SNP
     '''
 
-    ld_scores = {}
-    for snp in snps:
-        if len(ld_table) > 0:
-            ld_score = sum(ld_table["R2"])
-        else:
-            ld_score = 0
+    if len(ld_table) > 0:
+        ld_score = sum(ld_table["R2"])
+    else:
+        ld_score = 0
 
-        if scale:
-            ld_scores[snp] = ld_score/len(ld_table)
-        else:
-            ld_scores[snp] = ld_score
+    if scale:
+        ld_scores = ld_score/len(ld_table)
+    else:
+        ld_scores = ld_score
 
-    return pd.Series(ld_scores)
+    return ld_scores
 
 
 def calcWeightedEffects(gwas_results, snps, calc_se=True,
@@ -4011,8 +4058,9 @@ def snpPriorityScore(gwas_results, database, table_name,
       scores and SNP priority score.
     '''
 
+    E.info("Reading association results from %s" % gwas_results)
     gwas_df = pd.read_table(gwas_results, index_col=None,
-                            sep=None, header=0)
+                            sep="\t", header=0)
     if clean:
         pass
     else:
@@ -4045,17 +4093,31 @@ def snpPriorityScore(gwas_results, database, table_name,
                                    index_snp=snp,
                                    index_label="SNP_B")
 
-        ldsnps = ld_values["SNP_A"]
+        ldsnps = ld_values.loc[: ,"SNP_A"].values
+        ldsnps = {sx.rstrip("\n") for sx in ldsnps}
 
         ldscore = calcLdScores(ld_table=ld_values,
-                               snps=snp_set,
+                               snps=ldsnps,
                                scale=False)
         ld_scores[snp] = ldscore
-        
-        escore = calcWeightedEffects(gwas_results=chr_df.loc[ldsnps],
-                                     snps=ldsnps,
-                                     calc_se=True,
-                                     scale=True)
+
+        try:
+            gwas_results = chr_df.loc[ldsnps]
+            escore = calcWeightedEffects(gwas_results=gwas_results,
+                                         snps=ldsnps,
+                                         calc_se=True,
+                                         scale=True)
+        except KeyError:
+            gwas_results = chr_df.loc[snp]
+            if gwas_results["P"] == 0:
+                gwas_results["P"] = np.finfo(np.float64).min
+            else:
+                pass
+            z_func = lambda x: - 0.862 + sqrt(0.743 - 2.404 * np.log(x))
+            gwas_results["Z"] = z_func(gwas_results["P"])
+            gwas_results["SE"] = abs(np.log(gwas_results["OR"])/gwas_results["Z"])        
+            escore = gwas_results["SE"] * abs(np.log(gwas_results["OR"]))
+
         es_scores[snp] = escore
 
         weight = escore * ldscore
@@ -4064,4 +4126,544 @@ def snpPriorityScore(gwas_results, database, table_name,
     SNP_scores = pd.DataFrame([pd.Series(ld_scores),
                                pd.Series(es_scores),
                                pd.Series(priority_scores)]).T
+    SNP_scores.columns = ["LDScore", "WeightEffectSize", "PriorityScore"]
+    SNP_scores.sort_values(by="PriorityScore", inplace=True)
+    
     return SNP_scores
+
+
+def calculatePicsValues(snp_id, index_log10p, ld_values,
+                        prior=1.0, k=2):
+    '''
+    Use the PICS method to assign probability to SNPs as
+    being causal for association signals at a locus,
+    given the strength of their association (log10 P-value),
+    and linkage disequilbrium with the lead SNP (smallest
+    p-value at the locus).
+
+    This method allows the prioritisation of SNPs, including
+    those where there are multiple independent signals.  It
+    requires that these independent signals are however
+    input as seperate SNPs.
+
+    NB::
+      Fahr et al initially use k=6.4 based on their observation
+      that altering k=[6,8] does not have an appreciable impact
+      on the PICS values.  However, when comparing this
+      implementation to the PICS webserver, k=2 gives more
+      similar values based on the current Phase3 1000 Genomes
+      LD values and SNPs.
+
+    Arguments
+    ---------
+    snp_id: string
+      rs ID of the lead SNP from the associated region/
+      independent signal of association
+
+    index_log10p: float
+      the negative log10(p-value) of association with
+      the phenotype of interest
+
+    ld_values: pd.Core.DataFrame
+      A pandas dataframe of LD values between the index SNP
+      and all other SNPs given an arbitrary threshold.  The
+      expected columns are index SNP, SNP of interest, r^2.
+
+    prior: float
+      the prior value to attach to each SNP.  Can be used to
+      integrate functional information into the PICS
+      calculations.  NOT YET IMPLIMENTED.
+
+    k: float
+      The power to raise the correlation of alleles to.  When
+      k=2, this scales the standard deviation of the sample
+      distribution for the marignal likelihood by the residual
+      LD.  Increasing k downweights the LD difference between
+      the index SNP and SNP of interest.
+
+    Returns
+    -------
+    PICS: pandas.Core.Series
+      A pandas series of SNPs and calculated PICS scores.
+    '''
+
+    # assume the SNPs of interest are all contained in the
+    # ld_values table index
+
+    top_p = stats.norm(index_log10p,
+                       sqrt(index_log10p)/2).cdf(index_log10p)
+
+    prob_dict = {}
+    prob_dict[snp_id] = top_p
+
+    E.info("calculating scores for %i SNPs" % len(ld_values))
+    # If a SNP is in perfect LD with the index SNP this forces
+    # the standard deviation to be 0, add a small correction
+    # to allow the calculation of a marginal likelihood values
+    # e.g. 0.0001
+
+    for snp in ld_values.index:
+        try:
+            r2 = ld_values.loc[snp]["R2"]
+            r = sqrt(r2)
+            mu = r2 * index_log10p
+            sigma = sqrt(1 - (r ** k)) * (sqrt(index_log10p)/2)
+            if sigma == 0:
+                sigma = 0.0001
+            else:
+                pass
+            p = 1 - stats.norm(mu, sigma).cdf(index_log10p)
+            prob_dict[snp] = p
+        except KeyError:
+            E.warn("SNP %s not found in LD with %s" % (snp,
+                                                       snp_id))
+
+    # calculate normalized probabilities, where sum of all probs=1
+    # use numpy sum to handle NaN values
+    sum_probs = np.sum(prob_dict.values())
+    pics_dict = {}
+
+    for snp_p in prob_dict.keys():
+        pics_dict[snp_p] = prob_dict[snp_p]/sum_probs
+
+    pics_series = pd.Series(pics_dict)
+    PICS = pics_series.sort_values(ascending=False)
+
+    return PICS
+
+
+def getLdValues(database, table_name, index_snp, ld_threshold=0.5):
+    '''
+    Get all LD values for the index SNP above a given r^2
+    threshold
+
+    Arguments
+    ---------
+    database: sql.connection
+      An SQL database connection to the DB
+      containing the LD values
+
+    table_name: string
+      The table to query containing LD information
+
+    index_snp: string
+      SNP ID to select LD values from the SQL 
+      database on
+
+    ld_threshold: float
+      a threshold above which to select LD values
+      with the index SNP
+
+    Returns
+    -------
+    ld_df: pandas.Core.DataFrame
+      Pandas dataframe containing LD values over
+      target range.
+    '''
+
+    E.info("executing SQL query on table: %s" % table_name)
+    ld_a = selectLdFromDB(database=database,
+                          table_name=table_name,
+                          index_snp=index_snp,
+                          index_label="SNP_B",
+                          ld_threshold=ld_threshold)
+    ld_a.columns = ["SNP", "R2"]
+
+    ld_b = selectLdFromDB(database=database,
+                          table_name=table_name,
+                          index_snp=index_snp,
+                          index_label="SNP_A",
+                          ld_threshold=ld_threshold)
+    ld_b.columns = ["SNP", "R2"]
+
+    ld_df = ld_a.append(ld_b)
+    ld_df.index = ld_df["SNP"]
+    # drop duplicate indices
+    ld_df.drop_duplicates(subset="SNP",
+                          keep="last",
+                          inplace=True)                          
+
+    E.info("%i records found matching query" % len(ld_df))
+
+    return ld_df
+
+
+def PICSscore(gwas_results, database, table_name, chromosome,
+              clean=True, ld_threshold=0.5):
+    '''
+    Prioritise SNPs based on the conditional probability
+    of being the causal SNP at an associated region given
+    the strength of association and LD with surrounding SNPs.
+
+    Originally described in::
+      Fahr et al Nature 518 (2015) pp337
+
+    The current implementation does not allow the integration
+    of a prior probability - this will come in the future.
+
+    Arguments
+    ---------
+    gwas_results: string
+      Results from a GWAS, assumed to be in Plink format.
+
+    database: string
+      Path to an SQL database containing LD values in
+      table format
+
+    table_name: string
+      Specific table, often referring to a specific
+      chromosome, that contains LD values with columns
+      SNP_A, SNP_B, BP_A, BP_B and R2.
+
+    chromosome: string
+      A chromosome to select from the gwas_results
+      file.
+
+    clean: boolean
+      Whether the results table has been pre-cleaned to
+      remove results not relevant to SNPs. e.g. if
+      covariates had been included in the regression
+      model these should be removed.
+
+    ld_threshold: float
+      Threshold above which to select SNPs in LD 
+      with the lead SNP
+
+    Returns
+    -------
+    PICS_scores: pd.Core.DataFrame
+      A pandas dataframe of PICS scores for SNPs.
+    '''
+
+    E.info("Reading association results from %s" % gwas_results)
+    gwas_df = pd.read_table(gwas_results, index_col=None,
+                            sep="\t", header=0)
+    if clean:
+        pass
+    else:
+        gwas_df = gwas_df[gwas_df["TEST"] == "ADD"]
+
+    gwas_df.index = gwas_df["SNP"]
+
+    E.info("subsetting data on chromosome %s" % chromosome)
+    chr_df = gwas_df[gwas_df["CHR"] == int(chromosome)]
+    try:
+        chr_df.loc[:, "STAT"] = abs(chr_df["STAT"])
+        chr_df.sort_values(by="STAT", inplace=True, ascending=False)
+    except KeyError:
+        chr_df.sort_values(by="CHISQ", inplace=True, ascending=False)
+
+    chr_df.loc[:, "P"][chr_df["P"] == 0] = 1.79769e-308
+    chr_df["P"].fillna(1.0)
+    chr_df.loc[:, "log10P"] = np.log10(chr_df["P"])
+
+    index_snp = chr_df.iloc[0]["SNP"]
+
+    try:
+        indexp = -chr_df.iloc[0]["log10P"]
+    except KeyError:
+        indexp = -np.log10(chr_df.iloc[0]["P"])
+
+    E.info("index SNP is %s with -log10(p)= %0.3f" % (index_snp,
+                                                      indexp))
+
+    dbh = sql.connect(database)
+    ld_values = getLdValues(database=dbh,
+                            table_name=table_name,
+                            index_snp=index_snp,
+                            ld_threshold=ld_threshold)
+        
+    PICS_scores = calculatePicsValues(snp_id=index_snp,
+                                      index_log10p=indexp,
+                                      ld_values=ld_values,
+                                      prior=1.0,
+                                      k=2)
+
+    return PICS_scores
+
+
+def LdRank(gwas_results, database, table_name,
+           chromosome, ld_threshold=0.8,
+           top_snps=0.01, clean=True):
+    '''
+    Rank SNPs based on the LD with the lead SNP
+    from the association region.  Take the top
+    N% SNPs as the SNP set.
+
+    Arguments
+    ---------
+    gwas_results: string
+      Results from a GWAS, assumed to be in Plink format.
+
+    database: string
+      Path to an SQL database containing LD values in
+      table format
+
+    table_name: string
+      Specific table, often referring to a specific
+      chromosome, that contains LD values with columns
+      SNP_A, SNP_B, BP_A, BP_B and R2.
+
+    chromosome: string
+      A chromosome to select from the gwas_results
+      file.
+
+    ld_threshold: float
+      Threshold above which to select SNPs in LD 
+      with the lead SNP
+
+    top_snps: float
+      % SNPs to select, ranked on LD with the lead
+      SNP
+
+    Returns
+    -------
+    '''
+
+    E.info("Reading association results from %s" % gwas_results)
+    gwas_df = pd.read_table(gwas_results, index_col=None,
+                            sep="\t", header=0)
+    if clean:
+        pass
+    else:
+        gwas_df = gwas_df[gwas_df["TEST"] == "ADD"]
+
+    gwas_df.index = gwas_df["SNP"]
+
+    E.info("subsetting data on chromosome %s" % chromosome)
+    chr_df = gwas_df[gwas_df["CHR"] == int(chromosome)]
+    try:
+        chr_df.loc[:, "STAT"] = abs(chr_df["STAT"])
+        chr_df.sort_values(by="STAT", inplace=True, ascending=False)
+    except KeyError:
+        chr_df.sort_values(by="CHISQ", inplace=True, ascending=False)
+
+    chr_df.loc[:, "P"][chr_df["P"] == 0] = 1.79769e-308
+    chr_df["P"].fillna(1.0)
+    chr_df.loc[:, "log10P"] = np.log10(chr_df["P"])
+
+    index_snp = chr_df.iloc[0]["SNP"]
+
+    dbh = sql.connect(database)
+    ld_values = getLdValues(database=dbh,
+                            table_name=table_name,
+                            index_snp=index_snp,
+                            ld_threshold=ld_threshold)
+
+    # rank on LD with index SNP
+    E.info("sort and rank top %0.3f SNPs in "
+           "r2 > %0.3f with SNP %s" % (top_snps,
+                                       ld_threshold,
+                                       index_snp))
+    index_series = pd.DataFrame(
+        {"SNP": index_snp,
+         "R2": 1.00},
+        index=[index_snp])
+
+    if len(ld_values):
+        ld_values = ld_values.append(index_series)
+    else:
+        ld_values = index_series
+        ld_values.columns = ["SNP", "R2"]
+
+    ld_values.sort_values(by="R2", inplace=True,
+                          ascending=False)
+    size = len(ld_values)
+    # use the math module ceil function to get
+    # smallest integer greater than or equal to
+    # the top %n SNPs
+
+    top = ceil(size * top_snps)
+
+    top_ld = ld_values.iloc[0:top,]
+
+    return top_ld
+
+
+def calcApproxBayesFactor(log_or, standard_error,
+                          prior_variance):
+    '''
+    Calculate the approximate Bayes Factor (ABF) from Wakefield 
+    Am. J. Hum. Genet.(2015) for a SNP.  The ABF is calculated
+    from the effect size (log OR), variance (Standard error)
+    and a prior weight on the variance (W).
+
+    Arguments
+    ---------
+    log_or: float
+      The natural logarithm of the odds ratio or the effect
+      size estimate on the observed scale.
+
+    standard_error: float
+      The standard error estimate on the effect size from
+      the appropriate regression model
+
+    prior_variance: float
+      A prior variance weighting to apply to the variance for
+      calculating the ABF.
+
+    Returns
+    -------
+    ABF: float
+      The calculated Approximate Bayes Factor
+    '''
+
+    _top = sqrt(prior_variance/(prior_variance + standard_error))
+    _exp_top = (log_or ** 2) * prior_variance
+    _exp_denom = (2 * standard_error) * (standard_error + prior_variance)
+
+    ABF = _top * exp(_exp_top/_exp_denom)
+
+    return ABF
+
+
+def ABFScore(gwas_results, region_size, chromosome,
+             set_interval=0.99, prior=None,
+             prior_variance=0.04, clean=True):
+    '''
+    Using approximate Bayes factors generate a N% credible set
+    of candidate causal SNPs at a locus that capture N%
+    of the posterior probability of driving the association
+    signal.
+
+    Arguments
+    ---------
+    gwas_results: string
+      Results from a GWAS, assumed to be in Plink format.
+
+    region_size: int
+      The region (in bp) by which to extend around the
+      association signal index SNP - taken as the
+      fine-mapping region. Region is index bp +/-
+      region_size/2
+
+    set_interval: float
+      The proportion of the posterior probability explained
+      by the set of SNPs
+
+    chromosome: string
+      A chromosome to select from the gwas_results
+      file.
+
+    prior: float
+      Prior probability NOT YET IMPLEMENTED
+
+    prior_variance: float
+      The variance prior that weights the standard error
+
+    clean: boolean
+      Whether the results table has been pre-cleaned to
+      remove results not relevant to SNPs. e.g. if
+      covariates had been included in the regression
+      model these should be removed.
+
+
+    Returns
+    -------
+    credible_set: pandas.Core.DataFrame
+      The credible set of SNPs with their approximate Bayes
+      Factors and posterior probabilities
+    '''
+
+    E.info("Reading association results from %s" % gwas_results)
+    try:
+        gwas_df = pd.read_table(gwas_results, index_col=None,
+                                sep="\s*", header=0)
+    except StopIteration:
+        gwas_df = pd.read_table(gwas_results, index_col=None,
+                                sep="\t", header=0)
+        
+    if clean:
+        pass
+    else:
+        gwas_df = gwas_df[gwas_df["TEST"] == "ADD"]
+
+    gwas_df.index = gwas_df["SNP"]
+
+    E.info("subsetting data on chromosome %s" % chromosome)
+    chr_df = gwas_df[gwas_df["CHR"] == int(chromosome)]
+    try:
+        try:
+            chr_df.loc[:, "STAT"] = abs(chr_df["STAT"])
+            chr_df.sort_values(by="STAT", inplace=True, ascending=False)
+        except KeyError:
+            chr_df.loc[:, "T"] = abs(chr_df["T"])
+            chr_df.sort_values(by="T", inplace=True, ascending=False)
+    except KeyError:
+        chr_df.sort_values(by="CHISQ", inplace=True, ascending=False)
+
+    # set p = 0 to minimum float value, ~1.79x10-308
+    chr_df.loc[:, "P"][chr_df["P"] == 0] = 1.79769e-308
+    chr_df["P"].fillna(1.0)
+    chr_df.loc[:, "log10P"] = np.log10(chr_df["P"])
+
+    # get the index SNP and calculate standard errors
+    # used to calculate the approximate Bayes factor
+    E.info("calculating standard errors from association "
+           "p-values")
+    index_snp = chr_df.iloc[0]["SNP"]
+    index_bp = chr_df.iloc[0]["BP"]
+    z_func = lambda x: - 0.862 + sqrt(0.743 - 2.404 * np.log(x))
+    chr_df["Z"] = chr_df["P"].apply(z_func)
+    chr_df["SE"] = abs(np.log(chr_df["OR"])/chr_df["Z"])
+
+    start = index_bp - region_size/2
+    end = index_bp + region_size/2
+    chr_df.index = chr_df["BP"]
+    
+    E.info("Fine mapping region defined as %i - %i "
+           "on chromosome %i" % (start, end, int(chromosome)))
+
+    # subsetting on range will create many NaNs due to
+    # pandas broadcasting and filling in rows of DF
+    sig_df = chr_df.loc[range(start, end+1)]
+    sig_df.dropna(axis=0, how='all', inplace=True)
+    sig_df.drop_duplicates(subset="SNP", inplace=True)
+    sig_df.index = sig_df["SNP"]
+
+    # calculate the approximate bayes factor for
+    # each SNP
+    E.info("calculating approximate Bayes Factors")
+    bayes = {}
+    for snp in sig_df.index:
+        logor = np.log(sig_df.loc[snp]["OR"])
+        se = abs(sig_df.loc[snp]["SE"])
+
+        abf = calcApproxBayesFactor(log_or=logor,
+                                    standard_error=se,
+                                    prior_variance=prior_variance)
+        bayes[snp] = abf
+
+    sum_bayes = np.nansum(bayes.values())
+
+    # calculate posterior probabilities as the proportion
+    # of bayes factor/ sum all bayes factors
+    E.info("calculating posterior probabilities")
+    bayes_rank = pd.Series(bayes)
+    bayes_rank.sort_values(inplace=True, ascending=False)
+    bayes_rank = bayes_rank.fillna(0.0)
+
+    posteriors = bayes_rank/sum_bayes
+    posteriors.sort_values(ascending=False,
+                           inplace=True)
+
+    E.info("Finding %0.3f%% credible set" % set_interval)
+    prob_set = 0.0
+    cred_set = set()
+    for xsnp in bayes_rank.index:
+        prob_set += posteriors.loc[xsnp]
+        cred_set.add(xsnp)
+        if prob_set >= set_interval:
+            break
+        else:
+            continue
+
+    credible_posterior = posteriors.loc[cred_set]
+    credible_bayes = bayes_rank.loc[cred_set]
+    cred_dict = {"Posterior": credible_posterior,
+                 "ApproxBayesFactor": credible_bayes}
+    credible_set = pd.DataFrame(cred_dict)
+    credible_set.sort_values(by="Posterior", inplace=True,
+                             ascending=False)
+
+    return credible_set
