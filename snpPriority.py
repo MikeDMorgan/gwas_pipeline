@@ -38,6 +38,7 @@ import CGAT.Experiment as E
 import PipelineGWAS as gwas
 import re
 import pandas as pd
+import CGAT.IOTools as IOTools
 
 
 def main(argv=None):
@@ -53,13 +54,18 @@ def main(argv=None):
                             usage=globals()["__doc__"])
 
     parser.add_option("--score-method", dest="method", type="choice",
-                      choices=["PICS", "LDscore", "ABF", "R2_rank"],
+                      choices=["PICS", "LDscore", "ABF", "R2_rank",
+                               "get_eigen", "calc_prior"],
                       help="SNP scoring/prioritisation method to apply.")
 
     parser.add_option("--database", dest="database", type="string",
                       help="SQL database containing LD information "
                       "in table format. Expects columns SNP_A, "
                       "SNP_B, R2, BP_A and BP_B (Plink --r2 output)")
+
+    parser.add_option("--ld-directory", dest="ld_dir", type="string",
+                      help="directory containing tabix-index BGZIP "
+                      "LD files.  Assumes Plink used to calculate LD")
 
     parser.add_option("--table-name", dest="table", type="string",
                       help="name of the SQL table containing the LD"
@@ -90,6 +96,42 @@ def main(argv=None):
                       help="the region size to included around the index "
                       "SNP as the fine-mapping region.")
 
+    parser.add_option("--eigen-score-directory", dest="eigen_dir", type="string",
+                      help="PATH to directory containing tabix indexed "
+                      "eigen score files")
+
+    parser.add_option("--flat-prior", dest="flat_prior", action="store_true",
+                      help="Ignore functional annotation information and "
+                      "use an uninformative prior on each SNP")
+
+    parser.add_option("--snp-set", dest="snp_set", type="string",
+                      help="Pre-defined SNP set as a list of SNP IDs."
+                      "If used to calculate priors contains column of scores.")
+
+    parser.add_option("--distribution", dest="dist", type="choice",
+                      choices=["normal", "t", "gamma", "lognormal",
+                               "exponential"],
+                      help="distribution from which to draw prior "
+                      "probabilities")
+
+    parser.add_option("--distribution-parameters", dest="dist_params", type="string",
+                      help="distribution parameters as a comma-separated list")
+
+
+    parser.set_defaults(ld_dir=None,
+                        dist="normal",
+                        dist_params=None,
+                        snp_set=None,
+                        prior_var=0.04,
+                        interval=0.99,
+                        eigen_dir=None,
+                        map_window=100000,
+                        ld_threshold=0.5,
+                        database=None,
+                        table=None,
+                        flat_prior=False,
+                        )                        
+                        
     # add common options (-h/--help, ...) and parse command line
     (options, args) = E.Start(parser, argv=argv)
 
@@ -109,8 +151,46 @@ def main(argv=None):
                                           database=options.database,
                                           table_name=options.table,
                                           chromosome=options.chromosome,
+                                          ld_dir=options.ld_dir,
                                           clean=clean)
+        # take top 1%, all SNPs doesn't achieve anything useful
+        ranks = int(len(snpscores.index) * 0.01)
+        snpscores = snpscores.iloc[:ranks]
+        
     elif options.method == "PICS":
+        snp_list = {}
+        if options.snp_set and  not options.flat_prior:
+            with IOTools.openFile(options.snp_set, "r") as sfile:
+                for line in sfile.readlines():
+                    snp = line.split("\t")[0]
+                    try:
+                        score = float(line.split("\t")[-1].rstrip("\n"))
+                    except ValueError:
+                        score = 0
+                    snp_list[snp] = float(score)
+
+            # get the parameter estimates for the distribution
+            # if they have not been provided
+            if not options.dist_params:
+                dist_params = gwas.estimateDistributionParameters(data=snp_list.values(),
+                                                                  distribution=options.dist)
+            else:
+                dist_params = tuple([float(fx) for fx in options.dist_params.split(",")])
+
+            
+            E.info("Calculating priors on SNPs")
+            priors = gwas.calcPriorsOnSnps(snp_list=snp_list,
+                                           distribution=options.dist,
+                                           params=dist_params)
+
+        elif options.snp_set and options.flat_prior:
+            with IOTools.openFile(options.snp_set, "r") as sfile:
+                for line in sfile.readlines():
+                    snp = line.split("\t")[0]
+                    snp_list[snp] = 1.0
+            
+            priors = snp_list
+
         # PICS scores expects the gwas results file to
         # only contain the region of interest, which
         # represents an independent association signal
@@ -118,10 +198,29 @@ def main(argv=None):
                                    database=options.database,
                                    table_name=options.table,
                                    chromosome=options.chromosome,
+                                   priors=priors,
                                    clean=clean,
+                                   ld_dir=options.ld_dir,
                                    ld_threshold=options.ld_threshold)
 
         snpscores.columns = ["SNP", "PICS"]
+        posterior_sum = 0
+        snpscores.sort_values(ascending=False,
+                              inplace=True)
+        post_snps = []
+        snpscores.to_csv("/ifs/projects/proj045/pipeline_gwas/PICS_test.tsv",
+                         sep="\t", index_label="SNP")
+        for snp in snpscores.index:
+            if posterior_sum < 99.0:
+                posterior_sum += snpscores.loc[snp]
+                post_snps.append(snp)
+            else:
+                break
+
+        snpscores = snpscores.loc[post_snps]
+
+        snpscores.drop_duplicates(inplace=True)
+        
 
     elif options.method == "R2_rank":
         # rank SNPs based on their LD with the lead
@@ -129,6 +228,7 @@ def main(argv=None):
         snpscores = gwas.LdRank(gwas_results=infile,
                                 database=options.database,
                                 table_name=options.table,
+                                ld_dir=options.ld_dir,
                                 chromosome=options.chromosome,
                                 ld_threshold=options.ld_threshold,
                                 top_snps=options.rank_threshold,
@@ -141,6 +241,12 @@ def main(argv=None):
                                   set_interval=options.interval,
                                   prior_variance=options.prior_var,
                                   clean=clean)
+    elif options.method == "get_eigen":
+        E.info("Fetching Eigen scores")
+        snpscores = gwas.getEigenScores(eigen_dir=options.eigen_dir,
+                                        bim_file=infile,
+                                        snp_file=options.snp_set)
+        snpscores = pd.DataFrame(snpscores).T
 
     snpscores.to_csv(options.stdout, index_label="SNP",
                      sep="\t")

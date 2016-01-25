@@ -1537,7 +1537,7 @@ def unadjustedAssociation(infiles, outfile):
     --remove-individuals=%(gwas_exclude)s
     --association-method=assoc
     --genotype-rate=0.1
-    --hardy-weinberg=0.000001
+    --hardy-weinberg=0.000000000000001
     --min-allele-frequency=0.001
     --output-file-pattern=%(out_pattern)s
     --memory=%(mem)s
@@ -1620,7 +1620,7 @@ def pcAdjustedAssociation(infiles, outfile):
     --remove-individuals=%(remove)s
     --association-method=%(gwas_model)s
     --genotype-rate=0.1
-    --hardy-weinberg=0.000001
+    --hardy-weinberg=0.000000000000001
     --min-allele-frequency=0.001
     --output-file-pattern=%(out_pattern)s
     --memory=%(mem)s
@@ -1664,6 +1664,7 @@ def plotUnadjustedManhattan(infiles, outfile):
 
 @follows(mkdir("plots.dir"),
          unadjustedAssociation,
+         plotUnadjustedManhattan,
          pcAdjustedAssociation)
 @collate(pcAdjustedAssociation,
          regex("gwas.dir/(.+)_adj.assoc.%s" % PARAMS['gwas_model']),
@@ -1908,7 +1909,7 @@ def screenEpistasis(infiles, outfile):
     Specific interactions can be tested concretely
     once candidates are identified
 
-    Only test SNPs with MAF <= 0.5%
+    Only test SNPs with MAF >= 0.5%
     '''
     
     bed_file = infiles[0]
@@ -1952,7 +1953,7 @@ def testEpistasisVsRegion(infiles, outfile):
     Test for epistasis with a set of specific variants
     of interest provided in a Plink .set file
 
-    Only test SNPs with MAF <= 0.5%
+    Only test SNPs with MAF >= 0.5%
     '''
     
     bed_file = infiles[0]
@@ -2762,10 +2763,9 @@ def convertRefVcf(infiles, outfile):
 @follows(convertRefVcf,
          mkdir("ld.dir"),
          splitRegionsFile)
-@transform("conditional.dir/*.tsv",
-           regex("conditional.dir/chr(.+)-(.+)-(.+)_(.+).tsv"),
-           add_inputs([r"reference.dir/chr\1_ref.bed",
-                       r"reference.dir/chr\1_ref.fam",
+@transform(convertRefVcf,
+           regex("reference.dir/chr(.+)_ref.bed"),
+           add_inputs([r"reference.dir/chr\1_ref.fam",
                        r"reference.dir/chr\1_ref.bim"]),
            r"ld.dir/chr\1.ld.gz")
 def calcLd(infiles, outfile):
@@ -2776,32 +2776,85 @@ def calcLd(infiles, outfile):
     This needs to go into a database 
     '''
 
-    bed_file = infiles[1][0]
-    fam_file = infiles[1][1]
-    bim_file = infiles[1][2]
+    bed_file = infiles[0]
+    fam_file = infiles[1][0]
+    bim_file = infiles[1][1]
     plink_files = ",".join([bed_file, fam_file, bim_file])
 
     out_pattern = ".".join(outfile.split(".")[:-2])
-    job_memory = "60G"
-    cond_file = infiles[0].split("/")[-1]
-    chrome = cond_file.split("-")[0]
-    from_to = "_".join(cond_file.split("-")[1:3])
-    snprange = ",".join(from_to.split("_")[:2])
+    job_memory = "5G"
+    job_threads = 12
 
     statement = '''
     python /ifs/devel/projects/proj045/gwas_pipeline/geno2assoc.py
     --program=plink2
     --input-file-format=plink_binary
     --method=ld
-    --restrict-chromosome=%(chrome)s
-    --snp-range=%(snprange)s
     --ld-statistic=r2
-    --ld-min=0
+    --ld-min=0.05
     --ld-format-output=table
+    --memory="60G"
+    --threads=%(job_threads)s
     --log=%(outfile)s.log
     --output-file-pattern=%(out_pattern)s
     %(plink_files)s
-    > %(outfile)s.plink.log
+    > %(outfile)s.plink.log;
+    '''
+
+    P.run()
+
+
+@follows(calcLd)
+@transform(calcLd,
+           suffix(".ld.gz"),
+           ".ld.bgz")
+def bgzipLdFiles(infile, outfile):
+    '''
+    Tabix requires block Gzipped files
+    to index - zap input files to
+    save on storage.
+    '''
+
+    job_memory = "1G"
+    tmp_file = P.getTempFilename()
+    statements = []
+
+    statements.append('''
+    zcat %(infile)s | tr -s ' ' '\\t' |
+    sed 's/^[[:space:]]*//g' | 
+    sed 's/*[[:space:]]$//g' |
+    bgzip > %(outfile)s
+    ''')
+
+    # statements.append('''
+    # touch -r %(infile)s %(tmp_file)s
+    # ''')
+
+    # statements.append('''
+    # touch -r %(tmp_file)s %(infile)s
+    # ''')
+
+    # statements.append('''
+    # rm -rf %(tmp_file)s
+    # ''')
+
+    P.run()
+
+
+@follows(bgzipLdFiles)
+@transform(bgzipLdFiles,
+           suffix(".ld.bgz"),
+           ".ld.bgz.tbi")
+def tabixIndexLd(infile, outfile):
+    '''
+    Use tabix to index pair-wise LD
+    values on BP_B column
+    '''
+
+    job_memory = "4G"
+
+    statement = '''
+    tabix -S 1 -b 2 -e 2 %(infile)s
     '''
 
     P.run()
@@ -2813,7 +2866,8 @@ def calcLd(infiles, outfile):
            ".load")
 def loadLd(infile, outfile):
     '''
-    Load all LD values into separate tables
+    Load all LD values into separate tables,
+    use BP_A as the index
     '''
 
     job_memory = "60G"
@@ -2828,7 +2882,8 @@ def loadLd(infile, outfile):
     P.run()
 
     P.load(temp_file, outfile,
-           job_memory=job_memory)
+           job_memory=job_memory,
+           options="--add-index=BP_A")
 
 # ----------------------------------------------------------------------------------------#
 # ----------------------------------------------------------------------------------------#
@@ -2839,7 +2894,7 @@ def loadLd(infile, outfile):
 # need a list of SNPs that represent independent signals <- conditional and original
 # need: P-value, ORs, SE, LD, functional annotation(?)
 
-@follows(loadLd,
+@follows(tabixIndexLd,
          plotGenomeManhattan,
          mkdir("hit_regions.dir"))
 @subdivide("gwas.dir/*_adj.results",
@@ -2867,7 +2922,7 @@ def splitGwasRegions(infile, outfile):
     P.touch(outfile)
 
 
-@follows(loadLd,
+@follows(tabixIndexLd,
          conditionalAssociation,
          splitGwasRegions)
 @transform("conditional.dir/*.assoc.logistic",
@@ -2897,66 +2952,131 @@ def splitConditionalRegions(infile, outfile):
 
 @follows(splitGwasRegions,
          splitConditionalRegions,
-         mkdir("candidate_snps.dir"))
+         mkdir("snpsets.dir"))
 @transform("hit_regions.dir/*_significant.tsv",
-           regex("hit_regions.dir/(.+)_significant.tsv"),
-           r"candidate_snps.dir/\1_PICS.tsv")
-def calcPicsScores(infile, outfile):
+           regex("hit_regions.dir/(.+)_(.+)_significant.tsv"),
+           r"snpsets.dir/\1_\2.snpset")
+def makeSnpSets(infile, outfile):
     '''
-    Calculate the probabilisitc inference of causal SNPs
-    score for all association signals
+    Write file of SNP Ids for downstream task - use
+    results files
     '''
 
-    table = outfile.split("/")[-1].split("_")[0]
-    chrome = table.strip("chr")
-    
+    statement = '''
+    cat %(infile)s | cut -f 7 > %(outfile)s
+    '''
+
+    P.run()
+
+
+@follows(splitGwasRegions,
+         splitConditionalRegions,
+         makeSnpSets,
+         mkdir("scores.dir"))
+@transform(makeSnpSets,
+           regex("snpsets.dir/(.+)_(.+).snpset"),
+           add_inputs(r"%s/\1impv1.bim" % PARAMS['functional_bim_dir']),
+           r"scores.dir/\1_\2_scores.tsv")
+def getSnpFunctionalScores(infiles, outfile):
+    '''
+    Retrieve functional scores associated with
+    each SNP - used to calculate prior
+    probabilities for SNP prioritisation methods
+    '''
+
+    snp_set = infiles[0]
+    bim_file = infiles[1]
+
+    job_memory = "2G"
     statement = '''
     python /ifs/devel/projects/proj045/gwas_pipeline/snpPriority.py
-    --score-method=PICS
-    --database=csvdb
-    --table-name=%(table)s
-    --chromosome=%(chrome)s
+    --score-method=get_eigen
+    --eigen-score-directory=%(functional_score_dir)s
+    --snp-set=%(snp_set)s
     --log=%(outfile)s.log
-    %(infile)s
+    %(bim_file)s
     > %(outfile)s
     '''
 
     P.run()
+
+
+@follows(splitGwasRegions,
+         splitConditionalRegions,
+         getSnpFunctionalScores,
+         mkdir("candidate_snps.dir"))
+@transform("hit_regions.dir/*_significant.tsv",
+           regex("hit_regions.dir/(.+)_significant.tsv"),
+           add_inputs(r"scores.dir/\1_scores.tsv"),
+           r"candidate_snps.dir/\1_PICS.tsv")
+def calcPicsScores(infiles, outfile):
+    '''
+    Calculate the probabilisitc inference of causal SNPs
+    score for all association signals
+
+    Output SNPs which explain ~99% of posterior probability
+    of P(B^causal | A^lead)
+    '''
+    
+    snp_file = infiles[0]
+    score_file = infiles[1]
+    chrome = snp_file.split("/")[-1].split("_")[0]
+    chrome = chrome.lstrip("chr")
+
+    statement = '''
+    python /ifs/devel/projects/proj045/gwas_pipeline/snpPriority.py
+    --score-method=PICS
+    --chromosome=%(chrome)s
+    --snp-set=%(score_file)s
+    --distribution=normal
+    --flat-prior
+    --ld-dir=%(ld_dir)s
+    --ld-threshold=0.5
+    --log=%(outfile)s.log
+    %(snp_file)s
+    > %(outfile)s
+    '''
+
+    P.run()
+
+
+###########################
+# Take this out for the moment - it isn't mature yet
+
+# @follows(splitGwasRegions,
+#          splitConditionalRegions,
+#          calcPicsScores)
+# @transform("hit_regions.dir/*_significant.tsv",
+#            regex("hit_regions.dir/(.+)_significant.tsv"),
+#            r"candidate_snps.dir/\1_LDscore.tsv")
+# def calcLdScores(infile, outfile):
+#     '''
+#     Calculate the SE weighted effects * LDscore for all
+#     association signals.
+
+#     Select top 1% ranked variants
+#     '''
+
+#     table = outfile.split("/")[-1].split("_")[0]
+#     chrome = table.strip("chr")
+
+#     statement = '''
+#     python /ifs/devel/projects/proj045/gwas_pipeline/snpPriority.py
+#     --score-method=LDscore
+#     --ld-dir=%(ld_dir)s
+#     --ld-threshold=0.5
+#     --chromosome=%(chrome)s
+#     --log=%(outfile)s.log
+#     %(infile)s
+#     > %(outfile)s
+#     '''
+
+#     P.run()
 
 
 @follows(splitGwasRegions,
          splitConditionalRegions,
          calcPicsScores)
-@transform("hit_regions.dir/*_significant.tsv",
-           regex("hit_regions.dir/(.+)_significant.tsv"),
-           r"candidate_snps.dir/\1_LDscore.tsv")
-def calcLdScores(infile, outfile):
-    '''
-    Calculate the SE weighted effects * LDscore for all
-    association signals
-    '''
-
-    table = outfile.split("/")[-1].split("_")[0]
-    chrome = table.strip("chr")
-
-    statement = '''
-    python /ifs/devel/projects/proj045/gwas_pipeline/snpPriority.py
-    --score-method=LDscore
-    --database=csvdb
-    --table-name=%(table)s
-    --chromosome=%(chrome)s
-    --log=%(outfile)s.log
-    %(infile)s
-    > %(outfile)s
-    '''
-
-    P.run()
-
-
-@follows(splitGwasRegions,
-         splitConditionalRegions,
-         calcPicsScores,
-         calcLdScores)
 @transform("hit_regions.dir/*_significant.tsv",
            regex("hit_regions.dir/(.+)_significant.tsv"),
            r"candidate_snps.dir/\1_LDranks-1pc.tsv")
@@ -2972,8 +3092,7 @@ def calcTop1pcLdRanks(infile, outfile):
     statement = '''
     python /ifs/devel/projects/proj045/gwas_pipeline/snpPriority.py
     --score-method=R2_rank
-    --database=csvdb
-    --table-name=%(table)s
+    --ld-dir=%(ld_dir)s
     --chromosome=%(chrome)s
     --rank-threshold=0.01
     --ld-threshold=0.8
@@ -2988,7 +3107,6 @@ def calcTop1pcLdRanks(infile, outfile):
 @follows(splitGwasRegions,
          splitConditionalRegions,
          calcPicsScores,
-         calcLdScores,
          calcTop1pcLdRanks)
 @transform("hit_regions.dir/*_significant.tsv",
            regex("hit_regions.dir/(.+)_significant.tsv"),
@@ -3009,17 +3127,16 @@ def calcApproxBayesFactorScore(infile, outfile):
     python /ifs/devel/projects/proj045/gwas_pipeline/snpPriority.py
     --score-method=ABF
     --chromosome=%(chrome)s
+    --flat-prior
     --prior-variance=0.04
     --credible-interval=0.99
-    --fine-map-window=100000
+    --fine-map-window=500000
     --log=%(outfile)s.log
     %(infile)s
     > %(outfile)s
     '''
 
     P.run()
-
-
 
 # ----------------------------------------------------------------------------------------#
 # ----------------------------------------------------------------------------------------#

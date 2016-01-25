@@ -96,6 +96,9 @@ def main(argv=None):
                       help="outfile pattern to use for finding duplicates "
                       "and triallelic variants")
 
+    parser.add_option("--snp-set", dest="snp_subset", type="string",
+                      help="list of SNPs to include")
+
     # add common options (-h/--help, ...) and parse command line
     (options, args) = E.Start(parser, argv=argv)
 
@@ -115,7 +118,8 @@ def main(argv=None):
         summary, pens = gwas.calcPenetrance(options.ped_file,
                                             options.map_file,
                                             subset=options.subset,
-                                            mafs=options.mafs)
+                                            mafs=options.mafs,
+                                            snpset=options.snp_subset)
 
         pens.to_csv(options.stdout, sep="\t", index_label="SNP")
         summary.to_csv("/".join([os.getcwd(), "penetrance_summary.txt"]),

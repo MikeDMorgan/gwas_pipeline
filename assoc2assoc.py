@@ -15,7 +15,7 @@ Purpose
 Usage
 -----
 
-.. Example use case
+* `extract_results` - extract GWAS results for a specific SNP set
 
 Example::
 
@@ -35,6 +35,7 @@ Command line options
 import sys
 import CGAT.Experiment as E
 import PipelineGWAS as gwas
+import CGAT.IOTools as IOTools
 
 
 def main(argv=None):
@@ -53,7 +54,7 @@ def main(argv=None):
                       help="supply help")
 
     parser.add_option("--task", dest="task", type="choice",
-                      choices=["get_hits"],
+                      choices=["get_hits", "extract_results"],
                       help="task to perform")
 
     parser.add_option("--p-threshold", dest="p_threshold", type="float",
@@ -62,6 +63,10 @@ def main(argv=None):
 
     parser.add_option("--output-directory", dest="outdir", type="string",
                       help="output file directory")
+
+    parser.add_option("--snp-set", dest="snpset", type="string",
+                      help="file containing list of SNP per row to "
+                      "extract from GWAS results")
 
     # add common options (-h/--help, ...) and parse command line
     (options, args) = E.Start(parser, argv=argv)
@@ -79,8 +84,7 @@ def main(argv=None):
 
     if options.task == "get_hits":
         hits = results.getHits(float(options.p_threshold))
-        regions = hits.groupby(["CHR"])
-        for name, region in regions:
+        for name, region in hits:
             try:
                 try:
                     top_reg = region.sort_values(by="CHISQ",
@@ -108,6 +112,17 @@ def main(argv=None):
             E.info("output association results from Chr%s to %s" %
                    (str(name), out_file))
             region.to_csv(out_file, sep="\t", index=None)
+
+    elif options.task == "extract_results":
+        with IOTools.openFile(options.snpset, "r") as sfile:
+            snpset = sfile.readlines()
+            snpset = [snp.rstrip("\n") for snp in snpset]
+
+        snp_df = results.extractSNPs(snpset)
+        snp_df.dropna(axis=0, how='all', inplace=True)
+        snp_df.drop_duplicates(subset=["SNP"], inplace=True)
+        snp_df.to_csv(options.stdout, sep="\t", index=None)
+
     else:
         pass
 

@@ -7,12 +7,14 @@
 
 import CGAT.Experiment as E
 import CGATPipelines.Pipeline as P
+import CGAT.IOTools as IOTools
 import numpy as np
 import pandas as pd
 import pandas.io.sql as pdsql
 import re
 import random
 import os
+import subprocess
 import rpy2.robjects as ro
 from rpy2.robjects import r as R
 from rpy2.robjects import pandas2ri as py2ri
@@ -20,13 +22,14 @@ from rpy2.robjects.packages import importr
 # set matplotlib non-interactive backend to Agg to
 # allow running on cluster
 import matplotlib
-#matplotlib.use("Qt4Agg")
 import matplotlib.pyplot as plt
 from ggplot import *
 import collections
 import sqlite3 as sql
 from math import *
 import scipy.stats as stats
+import sklearn.metrics as metrics
+
 
 class FileGroup(object):
     '''
@@ -1331,8 +1334,8 @@ class Plink2(GWASProgram):
         '''
 
         statement = []
-        ld_map = {"r": " --r %s ",
-                  "r2": "--r2 %s "}
+        ld_map = {"r": " --r %s dprime ",
+                  "r2": "--r2 %s dprime "}
 
         shape_map = {"table":  "inter-chr gz",
                      "square": "square gz",
@@ -2206,7 +2209,10 @@ class GWASResults(object):
             assert peek["log10P"].any()
             results_frame = pd.read_table(association_file,
                                           sep="\t", header=0,
-                                          index_col=None)
+                                          index_col=None,
+                                          dtype={"BP": np.int64,
+                                                 "CHR": np.int64,
+                                                 "NMISS": np.int64})
             return results_frame
         except KeyError:
             pass
@@ -2373,22 +2379,89 @@ class GWASResults(object):
         '''
 
         hits_df = self.results[self.results["P"] <= threshold]
-        try:
-            try:
-                hits_df["STAT"] = abs(hits_df["STAT"])
-                hits_df.sort_values(by="STAT", inplace=True)
-            except KeyError:
-                hits_df["T"] = abs(hits_df["T"])
-                hits_df.sort_values(by="STAT", inplace=True)
-        except KeyError:
-            hits_df.sort_values(by="CHISQ", inplace=True)
-                
-        index_bp = hits_df.iloc[0]["BP"]
-        hits_df.index = hits_df["BP"]
+        # find the range of SNPs with 0.5Mb of each index SNP
+        contig_group = hits_df.groupby(["CHR"])
 
-        range_df = hits_df.loc[index_bp - 500000 : indexbp + 500000]
+        # there may be multiple independent hits on a given
+        # chromosome.  Need to identify independent regions.
+        # Base this on distance?
+        for contig, region in contig_group:
+            region.index = region["BP"]
+            chr_df = self.results[self.results["CHR"] == contig]
+            chr_df.index = chr_df["BP"]
+            # find independent regions and output consecutively
+            # if only a single SNP above threshold then there is
+            # only one independent region!!
+            if len(region) > 1:
+                independents = self.findIndependentRegions(region)
+                indi_group = independents.groupby("Group")
+            else:
+                region["Group"] = 1
+                indi_group = region.groupby("Group")
 
-        return range_df
+            for group, locus in indi_group:
+                try:
+                    try:
+                        locus.loc[:, "STAT"] = abs(locus["STAT"])
+                        region.sort_values(by="STAT", inplace=True)
+                    except KeyError:
+                        locus.loc[:, "T"] = abs(locus["T"])
+                        locus.sort_values(by="STAT", inplace=True)
+                except KeyError:
+                    locus.sort_values(by="CHISQ", inplace=True)
+
+                index_bp = locus.iloc[0]["BP"]
+                left_end = min(chr_df.loc[chr_df.index >= index_bp - 500000, "BP"])
+                right_end = max(chr_df.loc[chr_df.index <= index_bp + 500000, "BP"])
+       
+                range_df = chr_df.loc[left_end : right_end, :]
+
+                yield contig, range_df
+
+
+    def extractSNPs(self, snp_ids):
+        '''
+        Extract a specific set of SNP results
+
+        Arguments
+        ---------
+        snp_ids: list
+          a list of SNP IDs to extract from the
+          GWAS results
+
+        Returns
+        -------
+        snp_results: pandasd.Core.DataFrame
+        '''
+
+        self.results.index = self.results["SNP"]
+
+        snp_results = self.results.loc[snp_ids]
+
+        return snp_results
+
+    def findIndependentRegions(self, dataframe):
+        '''
+        Find the number of independent regions on
+        a chromsome.  Uses R distance and tree
+        cutting functions
+        '''
+
+        # mong dataframe into R
+        py2ri.activate()
+        r_df = py2ri.py2ri_pandasdataframe(dataframe)
+        R.assign("rdf", r_df)
+        R('''mat <- as.matrix(rdf$BP)''')
+        # get distances then cluster, chop tree at 1x10^7bp
+        R('''dist.mat <- dist(mat, method="euclidean")''')
+        R('''clusts <- hclust(dist.mat, "average")''')
+        R('''cut <- cutree(clusts, h=1e7)''')
+        R('''out.df <- rdf''')
+        R('''out.df$Group <- cut''')
+
+        regions_df = py2ri.ri2py_dataframe(R["out.df"])
+
+        return regions_df
 
 
 ##########################################################
@@ -2871,16 +2944,16 @@ def countByVariantAllele(ped_file, map_file):
     with open(ped_file, "r") as pfile:
         for indiv in pfile.readlines():
             indiv = indiv.strip("\n")
-            indiv_split = indiv.split(" ")
+            indiv_split = indiv.split("\t")
             fid = indiv_split[0]
             iid = indiv_split[1]
             mid = indiv_split[2]
             pid = indiv_split[3]
             gender = indiv_split[4]
             phen = indiv_split[5]
-            alleles = indiv_split[6:]
-            genos = ["".join([alleles[i],
-                              alleles[i+1]]) for i in range(0, len(alleles), 2)]
+            genos = indiv_split[6:]
+            #genos = ["".join([alleles[i],
+            #                  alleles[i+1]]) for i in range(0, len(alleles), 2)]
             tcount += 1
             # get genotype counts
             for i in range(len(genos)):
@@ -3013,16 +3086,16 @@ def calcMaxAlleleFreqDiff(ped_file, map_file, group_file,
     with open(ped_file, "r") as pfile:
         for indiv in pfile.readlines():
             indiv = indiv.strip("\n")
-            indiv_split = indiv.split(" ")
+            indiv_split = indiv.split("\t")
             fid = indiv_split[0]
             iid = indiv_split[1]
             mid = indiv_split[2]
             pid = indiv_split[3]
             gender = indiv_split[4]
             phen = indiv_split[5]
-            alleles = indiv_split[6:]
-            genos = ["".join([alleles[i],
-                              alleles[i+1]]) for i in range(0, len(alleles), 2)]
+            genos = indiv_split[6:]
+            #genos = ["".join([alleles[i],
+            #                  alleles[i+1]]) for i in range(0, len(alleles), 2)]
 
             # check for ref and test conditions
             # ignore individuals in neither camp
@@ -3105,7 +3178,7 @@ def calcMaxAlleleFreqDiff(ped_file, map_file, group_file,
 
 
 def calcPenetrance(ped_file, map_file, mafs=None,
-                   subset=None):
+                   subset=None, snpset=None):
     '''
     Calculate the proportion of times an allele is observed
     in the phenotype subset vs it's allele frequency.
@@ -3143,7 +3216,15 @@ def calcPenetrance(ped_file, map_file, mafs=None,
             variants[snpid] = {"chr": attrs[0],
                                "pos": attrs[-1].strip("\n")}
 
-    variant_ids = variants.keys()
+    if snpset:
+        with IOTools.openFile(snpset, "r") as sfile:
+            snps = sfile.readlines()
+            snps = [sx.rstrip("\n") for sx in snps]
+            variant_ids = [ks for ks in variants.keys() if ks in snps]
+    else:
+        variant_ids = variants.keys()
+
+    var_idx = [si for si, sj in enumerate(variant_ids)]
     case_mat = np.zeros((len(variant_ids), len(variant_ids)),
                         dtype=np.float64)
 
@@ -3152,13 +3233,14 @@ def calcPenetrance(ped_file, map_file, mafs=None,
 
     tcount = 0
     ncases = 0
+
     # missing phenotype individuals must be ignored, else
     # they will cause the number of individuals explained
     # to be underestimated
     with open(ped_file, "r") as pfile:
         for indiv in pfile.readlines():
             indiv = indiv.strip("\n")
-            indiv_split = indiv.split(" ")
+            indiv_split = indiv.split("\t")
             fid = indiv_split[0]
             iid = indiv_split[1]
             mid = indiv_split[2]
@@ -3172,9 +3254,10 @@ def calcPenetrance(ped_file, map_file, mafs=None,
                     select = gender
                 else:
                     select = None
-                alleles = indiv_split[6:]
-                genos = ["".join([alleles[i],
-                                  alleles[i+1]]) for i in range(0, len(alleles), 2)]
+                genos = np.array(indiv_split[6:])
+                genos = genos[var_idx]
+                #genos = ["".join([alleles[i],
+                #                  alleles[i+1]]) for i in range(0, len(alleles), 2)]
                 tcount += 1
 
                 het = np.zeros(len(genos), dtype=np.float64)
@@ -3866,6 +3949,85 @@ def mergeQcExclusions(hets_file=None, inbred_file=None,
     return exclusions
 
 
+def selectLdFromTabix(ld_dir, chromosome, snp_pos,
+                      ld_threshold=0):
+    '''
+    Select all LD values from a tabix indexed BGZIP
+    file of LD.  Assumes Plink format.
+
+    Arguments
+    ---------
+    ld_dir: string
+      path to directory containing LD data
+
+    chromosome: string
+      chromosome of SNP to pull out LD values
+      assumes chrN format
+
+    snp_pos: int
+      bp mapping position of the SNP on the same
+      genome build as the LD was calculated
+
+    ld_threshold: float
+      minimum LD value to return
+
+    Returns
+    -------
+    ld_df: pandas.Core.DataFrame
+      Pandas dataframe containing LD values over
+      target range.
+    '''
+
+    tab_dir = [td for td in os.listdir(ld_dir) if re.search(".bgz$", td)]
+    contig = int(chromosome.lstrip("chr"))
+    start = snp_pos
+    end = snp_pos
+
+    tab_query = """
+    tabix %(ld_dir)s/%(tab_indx)s %(contig)i:%(start)i-%(end)i |
+    awk '{if($7 >= %(ld_threshold)s) print $0}'"""
+    
+    tab_indx = [tx for tx in tab_dir if re.search(chromosome,
+                                                  tx)][-1]
+
+    E.info("Retrieving LD values at bp: %i" % snp_pos)
+    proc = subprocess.Popen(tab_query % locals(),
+                            shell=True,
+                            stdout=subprocess.PIPE)
+
+    ld_dict = {}
+    count = 0
+    for line in proc.stdout:
+        snp_dict = {}
+        parse = line.split("\t")
+        snp_dict["CHR_A"] = int(parse[0])
+        snp_dict["BP_A"] = int(parse[1])
+        snp_dict["SNP_A"] = parse[2]
+        snp_dict["CHR_B"] = int(parse[3])
+        snp_dict["BP_B"] = int(parse[4])
+        snp_dict["SNP_B"] = parse[5]
+        snp_dict["R2"] = float(parse[6])
+        snp_dict["DP"] = float(parse[7])
+        count += 1
+        ld_dict[count] = snp_dict
+
+    ld_df = pd.DataFrame(ld_dict).T
+    # ld Dataframe may be empty, return
+    # empty dataframe
+    try:
+        ld_df.index = ld_df["SNP_B"]
+        ld_df.drop_duplicates(subset="SNP_B",
+                              keep="last",
+                              inplace=True)
+    except KeyError:
+        ld_df = pd.DataFrame(np.nan,
+                             index=[snp_pos],
+                             columns=["SNP_A",
+                                      "R2"])
+
+    return ld_df
+
+
 def selectLdFromDB(database, table_name,
                    index_snp,
                    index_label=None,
@@ -3892,6 +4054,9 @@ def selectLdFromDB(database, table_name,
     index_label: str
       Column label in SQL database to use as the
       index in the output dataframe
+
+    ld_threshold: float
+      minimum LD value to return
 
     Returns
     -------
@@ -4016,8 +4181,8 @@ def calcWeightedEffects(gwas_results, snps, calc_se=True,
         return es_score
 
 
-def snpPriorityScore(gwas_results, database, table_name,
-                     chromosome, clean=True):
+def snpPriorityScore(gwas_results, chromosome, ld_dir=None,
+                     clean=True, database=None, table_name=None):
     '''
     Generate SNP scores based on the amount of genetic variation
     they capture and the sum of the weighted effect sizes for
@@ -4031,6 +4196,9 @@ def snpPriorityScore(gwas_results, database, table_name,
     ---------
     gwas_results: string
       Results from a GWAS, assumed to be in Plink format.
+
+    ld_dir: string
+      directory containing tabix index LD files from Plink
 
     database: string
       Path to an SQL database containing LD values in
@@ -4061,9 +4229,14 @@ def snpPriorityScore(gwas_results, database, table_name,
     E.info("Reading association results from %s" % gwas_results)
     gwas_df = pd.read_table(gwas_results, index_col=None,
                             sep="\t", header=0)
+
     if clean:
-        pass
+        gwas_df = pd.read_table(gwas_results, index_col=None,
+                                sep="\t", header=0)
+
     else:
+        gwas_df = pd.read_table(gwas_results, index_col=None,
+                                sep="\s*", header=0)
         gwas_df = gwas_df[gwas_df["TEST"] == "ADD"]
 
     gwas_df.index = gwas_df["SNP"]
@@ -4077,24 +4250,37 @@ def snpPriorityScore(gwas_results, database, table_name,
     # ~250Kb, with 25kb overlap.
 
     chr_df = gwas_df[gwas_df["CHR"] == int(chromosome)]
-
+    # duplicates cause selection of individual SNPs
+    # to break - why are there still duplicates??
+    chr_df.drop_duplicates(subset="BP", keep="last",
+                           inplace=True)
+   
     priority_list = []
     ld_scores = {}
     es_scores = {}
     priority_scores = {}
-
-    dbh = sql.connect(database)
     snp_set = chr_df.index
+
+    if database:
+        dbh = sql.connect(database)
+    else:
+        pass
 
     # iterate over SNPs
     for snp in snp_set:
-        ld_values = selectLdFromDB(dbh,
-                                   table_name=table_name,
-                                   index_snp=snp,
-                                   index_label="SNP_B")
+        if database:
+            ld_values = selectLdFromDB(dbh,
+                                       table_name=table_name,
+                                       index_snp=snp,
+                                       index_label="SNP_B")
+        elif ld_dir:
+            snp_pos = int(chr_df.loc[snp, "BP"])
+            ld_values = selectLdFromTabix(ld_dir=ld_dir,
+                                          chromosome=chromosome,
+                                          snp_pos=snp_pos)
 
         ldsnps = ld_values.loc[: ,"SNP_A"].values
-        ldsnps = {sx.rstrip("\n") for sx in ldsnps}
+        ldsnps = {sx for sx in ldsnps}
 
         ldscore = calcLdScores(ld_table=ld_values,
                                snps=ldsnps,
@@ -4132,8 +4318,157 @@ def snpPriorityScore(gwas_results, database, table_name,
     return SNP_scores
 
 
+def fitPrior(value, distribution, dist_params):
+    '''
+    Fit a prior probability given a value,
+    distribution and distribution parameters.
+
+    You are responsible for defining the appropriate
+    distribution and parameters
+
+    Arguments
+    ---------
+    Value: float
+      A value to calculate a prior probability from
+
+    distribution: string
+      A distribution from which to calculate a probability.
+      Current values are "normal", "t", "gamma",
+      "lognormal", "exponential".
+
+    dist_params: tuple
+      parameters to define the distribution,
+      * normal: (mean, std)
+      * t: (df, ncp)
+      * gamma: (k, theta)
+      * lognormal: (ln(mean), std)
+      * exponential: (lambda)
+
+    Returns
+    -------
+    prior: float
+      Prior probability attached to input value
+    '''
+
+    # distribution parameters should be passed
+    # explicitly
+    if distribution == "normal":
+        prior = 1 - stats.norm(*dist_params).cdf(value)
+    elif distribution == "t":
+        prior = 1 - stats.t(*dist_params).cdf(value)
+    elif distribution == "gamma":
+        prior = 1 - stats.gamma(*dist_params).cdf(value)
+    elif distribution == "lognormal":
+        prior = 1 - stats.lognorm(*dist_params).cdf(value)
+    elif distribution == "exponential":
+        prior = 1 - stats.expon(*dist_params).cdf(value)
+    else:
+        raise ValueError("Distrubtion %s not "
+                         "implemented" % distribution)
+
+    return prior
+
+
+def calcPriorsOnSnps(snp_list, distribution, params=None):
+    '''
+    Calculate prior probabilities on SNPs based
+    on a predefined value, a distribution and
+    parameters to describe the distribution.
+    This relies inherently on the correct and
+    appropriate distribution to be defined, i.e.
+    that it is conjugate to the likelihood function.
+    TO DO: introduce robust Bayesian modelling
+
+    Arguments
+    ---------
+    snp_list: dict
+      SNPs with score/value attached to determine
+      the prior probability
+
+    distribution: string
+      the distribution from which to draw probabilities
+
+    params: tuple
+      parameters to describe the appropriate
+      distribution.
+
+    Returns
+    -------
+    prior_probs: dict
+      dictionary of priors for SNPs
+    '''
+
+    prior_probs = {}
+    # if their is no score for that SNP then use an
+    # uninformative or Jeffrey's prior
+    for snp in snp_list.keys():
+        if snp_list[snp] != 0:
+            prior_probs[snp] = fitPrior(value=snp_list[snp],
+                                        distribution=distribution,
+                                        dist_params=params)
+        else:
+            prior_probs[snp] = 0.5
+
+    return prior_probs
+
+def estimateDistributionParameters(data,
+                                   distribution,
+                                   fscale=None,
+                                   floc=None,
+                                   **kwargs):
+    '''
+    Use maximum likelihood to estimate the parameters
+    of the defined distribution.
+
+    Arguments
+    ---------
+    data: pd.Series/np.array
+      data used to estimate parameters from
+
+    distribution: string
+      distribution assumed to underlie the data
+      generation process
+
+    fscale: float
+      scale parameter of the distribution to fix
+
+    floc: float
+      location parameter of the distribution to
+      fix
+
+    **kwargs: float
+      additional kwargs to pass as fixed parameters
+
+    Returns
+    -------
+    est_params: tuple
+      estimated distribution parameters
+    '''
+
+    if distribution == "normal":
+        mu, sigma = stats.norm.fit(data)
+        est_params = (mu, sigma,)
+    elif distribution == "t":
+        df, mu, sigma = stats.t.fit(data)
+        est_params = (df, mu, sigma,)
+    elif distribution == "gamma":
+        k, theta, mu = stats.gamma.fit(data)
+        est_params = (k, theta, mu,)
+    elif distribution == "lognormal":
+        exp_mu, sigma, theta = stats.lognorm.fit(data)
+        est_params = (exp_mu, sigma, theta,)
+    elif distribution == "exponential":
+        beta, lambda_x = stats.expon.fit(data)
+        est_params = (beta, lambda_x,)
+    else:
+        raise ValueError("Distrubtion %s not "
+                         "implemented" % distribution)
+
+    return est_params
+
+
 def calculatePicsValues(snp_id, index_log10p, ld_values,
-                        prior=1.0, k=2):
+                        priors=None, k=2):
     '''
     Use the PICS method to assign probability to SNPs as
     being causal for association signals at a locus,
@@ -4169,10 +4504,10 @@ def calculatePicsValues(snp_id, index_log10p, ld_values,
       and all other SNPs given an arbitrary threshold.  The
       expected columns are index SNP, SNP of interest, r^2.
 
-    prior: float
+    priors: dict
       the prior value to attach to each SNP.  Can be used to
       integrate functional information into the PICS
-      calculations.  NOT YET IMPLIMENTED.
+      calculations.  EXPERIMENTAL
 
     k: float
       The power to raise the correlation of alleles to.  When
@@ -4199,7 +4534,7 @@ def calculatePicsValues(snp_id, index_log10p, ld_values,
     E.info("calculating scores for %i SNPs" % len(ld_values))
     # If a SNP is in perfect LD with the index SNP this forces
     # the standard deviation to be 0, add a small correction
-    # to allow the calculation of a marginal likelihood values
+    # to allow the calculation of marginal likelihood value
     # e.g. 0.0001
 
     for snp in ld_values.index:
@@ -4212,8 +4547,10 @@ def calculatePicsValues(snp_id, index_log10p, ld_values,
                 sigma = 0.0001
             else:
                 pass
-            p = 1 - stats.norm(mu, sigma).cdf(index_log10p)
-            prob_dict[snp] = p
+            likelihood = 1 - stats.norm(mu, sigma).cdf(index_log10p)
+            prior = priors[snp]
+            # prior = 1.0
+            prob_dict[snp] = likelihood * prior
         except KeyError:
             E.warn("SNP %s not found in LD with %s" % (snp,
                                                        snp_id))
@@ -4288,8 +4625,9 @@ def getLdValues(database, table_name, index_snp, ld_threshold=0.5):
     return ld_df
 
 
-def PICSscore(gwas_results, database, table_name, chromosome,
-              clean=True, ld_threshold=0.5):
+def PICSscore(gwas_results, chromosome, database=None, 
+              table_name=None, priors=None, clean=True,
+              ld_threshold=0.5, ld_dir=None):
     '''
     Prioritise SNPs based on the conditional probability
     of being the causal SNP at an associated region given
@@ -4306,6 +4644,9 @@ def PICSscore(gwas_results, database, table_name, chromosome,
     gwas_results: string
       Results from a GWAS, assumed to be in Plink format.
 
+    ld_dir: string
+      directory containing tabix index LD files from Plink
+
     database: string
       Path to an SQL database containing LD values in
       table format
@@ -4318,6 +4659,11 @@ def PICSscore(gwas_results, database, table_name, chromosome,
     chromosome: string
       A chromosome to select from the gwas_results
       file.
+
+    priors: dict
+      the prior value to attach to each SNP.  Can be used to
+      integrate functional information into the PICS
+      calculations.  EXPERIMENTAL
 
     clean: boolean
       Whether the results table has been pre-cleaned to
@@ -4336,11 +4682,13 @@ def PICSscore(gwas_results, database, table_name, chromosome,
     '''
 
     E.info("Reading association results from %s" % gwas_results)
-    gwas_df = pd.read_table(gwas_results, index_col=None,
-                            sep="\t", header=0)
     if clean:
-        pass
+        gwas_df = pd.read_table(gwas_results, index_col=None,
+                                sep="\t", header=0)
+
     else:
+        gwas_df = pd.read_table(gwas_results, index_col=None,
+                                sep="\s*", header=0)
         gwas_df = gwas_df[gwas_df["TEST"] == "ADD"]
 
     gwas_df.index = gwas_df["SNP"]
@@ -4367,23 +4715,30 @@ def PICSscore(gwas_results, database, table_name, chromosome,
     E.info("index SNP is %s with -log10(p)= %0.3f" % (index_snp,
                                                       indexp))
 
-    dbh = sql.connect(database)
-    ld_values = getLdValues(database=dbh,
-                            table_name=table_name,
-                            index_snp=index_snp,
-                            ld_threshold=ld_threshold)
-        
+    if database:
+        dbh = sql.connect(database)
+        ld_values = getLdValues(database=dbh,
+                                table_name=table_name,
+                                index_snp=index_snp,
+                                ld_threshold=ld_threshold)
+    elif ld_dir:
+        snp_pos = int(chr_df.loc[index_snp]["BP"])
+        ld_values = selectLdFromTabix(ld_dir=ld_dir,
+                                      chromosome=chromosome,
+                                      snp_pos=snp_pos)
+
     PICS_scores = calculatePicsValues(snp_id=index_snp,
                                       index_log10p=indexp,
                                       ld_values=ld_values,
-                                      prior=1.0,
+                                      priors=priors,
                                       k=2)
 
     return PICS_scores
 
 
-def LdRank(gwas_results, database, table_name,
-           chromosome, ld_threshold=0.8,
+def LdRank(gwas_results, chromosome,
+           ld_dir=None, database=None,
+           table_name=None, ld_threshold=0.8,
            top_snps=0.01, clean=True):
     '''
     Rank SNPs based on the LD with the lead SNP
@@ -4394,6 +4749,9 @@ def LdRank(gwas_results, database, table_name,
     ---------
     gwas_results: string
       Results from a GWAS, assumed to be in Plink format.
+
+    ld_dir: string
+      directory containing tabix index LD files from Plink
 
     database: string
       Path to an SQL database containing LD values in
@@ -4424,8 +4782,12 @@ def LdRank(gwas_results, database, table_name,
     gwas_df = pd.read_table(gwas_results, index_col=None,
                             sep="\t", header=0)
     if clean:
-        pass
+        gwas_df = pd.read_table(gwas_results, index_col=None,
+                                sep="\t", header=0)
+
     else:
+        gwas_df = pd.read_table(gwas_results, index_col=None,
+                                sep="\s*", header=0)
         gwas_df = gwas_df[gwas_df["TEST"] == "ADD"]
 
     gwas_df.index = gwas_df["SNP"]
@@ -4444,11 +4806,17 @@ def LdRank(gwas_results, database, table_name,
 
     index_snp = chr_df.iloc[0]["SNP"]
 
-    dbh = sql.connect(database)
-    ld_values = getLdValues(database=dbh,
-                            table_name=table_name,
-                            index_snp=index_snp,
-                            ld_threshold=ld_threshold)
+    if database:
+        dbh = sql.connect(database)
+        ld_values = getLdValues(database=dbh,
+                                table_name=table_name,
+                                index_snp=index_snp,
+                                ld_threshold=ld_threshold)
+    elif ld_dir:
+        snp_pos = int(chr_df.loc[index_snp]["BP"])
+        ld_values = selectLdFromTabix(ld_dir=ld_dir,
+                                      chromosome=chromosome,
+                                      snp_pos=snp_pos)
 
     # rank on LD with index SNP
     E.info("sort and rank top %0.3f SNPs in "
@@ -4650,6 +5018,14 @@ def ABFScore(gwas_results, region_size, chromosome,
     E.info("Finding %0.3f%% credible set" % set_interval)
     prob_set = 0.0
     cred_set = set()
+    # side effect - write all ABFs and Posteriors out to file
+    out_df = pd.DataFrame({"Posterior": posteriors,
+                           "ApproxBayesFactor": bayes_rank,
+                           "SNP": posteriors.index})
+
+    out_df.to_csv("/ifs/projects/proj045/pipeline_gwas/ABFs_test.tsv",
+                  sep="\t", index=0)
+
     for xsnp in bayes_rank.index:
         prob_set += posteriors.loc[xsnp]
         cred_set.add(xsnp)
@@ -4667,3 +5043,393 @@ def ABFScore(gwas_results, region_size, chromosome,
                              ascending=False)
 
     return credible_set
+
+
+def getSnpIds(snp_set):
+    '''
+    Parse a text file with SNP IDs,
+    one per row. Remove duplicates.
+
+    Arguments
+    ---------
+    snp_set: string
+      file containing SNP IDs
+
+    Returns
+    -------
+    snp_list: set
+      set of unique SNP IDs
+    '''
+
+    E.info("Parsing SNP set IDs")
+    with IOTools.openFile(snp_set, "r") as sfile:
+        snps = [sn.split("\t")[0] for sn in sfile.readlines()]
+        snpset = set(snps)
+        snp_list = [s.rstrip("\n") for s in snpset]
+
+    return snp_list
+
+
+def getEigenScores(eigen_dir, bim_file, snp_file):
+    '''
+    Extract Eigen scores from tabix-index files
+    for all SNPs in a provided .bim file
+
+    Arguments
+    ---------
+    eigen_dir: string
+      PATH to directory containing eigen scores, with
+      suffix .tab.bgz
+
+    bim_file: string
+      plink .bim file containing SNP co-ordinates
+      and alleles - assumes minor allele is A2
+
+    snp_file: string
+      file containing SNP IDs, one per line
+
+    Returns
+    -------
+    snp_dict: dict
+      SNP eigen scores
+    '''
+
+    # setup a generic tabix query to reduce number
+    # of operations
+
+    tab_query = """
+    tabix %(eigen_dir)s/%(tab_indx)s %(contig)i:%(start)i-%(end)i |
+    awk '{if($4 == "%(A1)s") print $0}'
+    """
+
+    tab_dir = [td for td in os.listdir(eigen_dir) if re.search(".bgz$", td)]
+
+    snp_list = getSnpIds(snp_file)
+    E.info("SNP set of %i SNPs" % len(snp_list))
+    
+    snp_dict = {}
+    E.info("Parsing SNP co-ordinates")
+    # tried straightforward file parsing, took too long
+    # as average .bim file contains millions of lines
+    # read in chunks in to pandas DataFrame, return
+    # a generator
+    header = ["CHR", "SNP", "cM", "BP", "A1", "A2"]
+    file_iterator = pd.read_table(bim_file, sep="\t",
+                                  chunksize=50000,
+                                  header=None,
+                                  index_col=None,
+                                  names=header)
+
+    for dataframe in file_iterator:
+        dataframe.index = dataframe["SNP"]
+        try:
+            snp_frame = dataframe.loc[snp_list]
+            # not all SNPs will appear together in a chunk
+            # remove NA rows and duplicates
+            snp_frame.dropna(axis=0, how='all',
+                             inplace=True)
+            snp_frame.drop_duplicates(subset="SNP", keep="last",
+                                      inplace=True)
+
+            snp_frame.loc[:, "CHR"] = snp_frame["CHR"].astype(np.int64)
+            contig = snp_frame["CHR"][0]
+            recontig = re.compile("chr%i" % contig)
+            tab_indx = [tx for tx in tab_dir if re.search(recontig,
+                                                          tx)][-1]
+
+            # redefine float types as int for output 
+            # prettify and reduce downstream bugs with assumed
+            # data types
+            snp_frame.loc[:, "BP"] = snp_frame["BP"].astype(np.int64)
+
+            for snp in snp_frame.index:
+                # open a process with query, process on the fly
+                A1 = snp_frame.loc[snp, "A1"]
+                A2 = snp_frame.loc[snp, "A2"]
+                start = snp_frame.loc[snp, "BP"]
+                end = start
+               
+                proc = subprocess.Popen(tab_query % locals(),
+                                        shell=True,
+                                        stdout=subprocess.PIPE)
+                score_line = proc.stdout.readlines()
+                if len(score_line):
+                    eigen_score = score_line[0].split("\t")[-1].rstrip("\n")
+                else:
+                    eigen_score = np.nan
+            
+                score_dict = {"CHR": contig,
+                              "BP": start,
+                              "A1": A1,
+                              "A2": A2,
+                              "SCORE": eigen_score}
+
+                snp_dict[snp] = score_dict
+            E.info("Eigen scores found for %i SNPs" % len(snp_dict))
+        except KeyError:
+            pass
+
+    return snp_dict
+
+
+def getSNPs(map_file, snp_list):
+    '''
+    Given a SNP list with GWAS results, 
+    extract the relevant index
+
+    Arguments
+    ---------
+    map_file: string
+      plink format .map file with SNP positions
+      in same order as .ped file
+
+    snp_list: list
+      list of SNP rs IDs with GWAS results
+
+    Returns
+    -------
+    snp_index: dict
+      dict of SNP, indices key,value pairs to select
+    '''
+
+    # variant order in the map file matters, use an ordered dict
+    variants = collections.OrderedDict()
+    with open(map_file, "r") as mfile:
+        for snp in mfile.readlines():
+            attrs = snp.split("\t")
+            snpid = attrs[1]
+            variants[snpid] = {"chr": attrs[0],
+                               "pos": attrs[-1].strip("\n")}
+
+    variant_ids = [vj for vi, vj in enumerate(variants.keys()) if vj in snp_list]
+    variant_idx = [i for i,j in enumerate(variants.keys()) if j in snp_list]
+    var_idx = dict(zip(variant_ids, variant_idx))
+
+    return var_idx
+
+
+def flipRiskAlleles(snp_index, snp_results, genos):
+    '''
+    Given an OR of a SNP on a binary phenotype,
+    convert minor alleles to "risk" alleles, i.e.
+    where OR > 1, if not, then invert allele
+
+    Arguments
+    ---------
+    snp_index: list
+      list of snp indices with GWAS results
+
+    snp_results: dict
+      snp:OR key, value pairs of SNPs and GWAS
+      results
+
+    genos: np.ndarray
+      array of genotypes in format "11", "12" or
+      "22" where 1 = minor allele, 2 = major allele.
+
+    Returns
+    -------
+    risk_genos: np.ndarray
+      Genotypes where all "1" alleles are risk alleles,
+      not major alleles.
+    '''
+
+    genarray = np.array(genos)
+
+    # find SNP alleles to flip
+    flip = []
+    for snp in snp_results.keys():
+        if snp_results[snp] < 1:
+            flip.append(snp_index[snp])
+        else:
+            pass
+
+    E.info("Flipped alleles: %i" % len(flip))
+
+    # swap alleles for SNPs where the minor (A1) allele
+    # is protective
+    # use intermediate values to avoid overwriting values
+    flip_array = genarray[:, flip]
+    np.place(flip_array, flip_array == "22", ["88"])
+    np.place(flip_array, flip_array == "11", ["99"])
+    np.place(flip_array, flip_array == "88", ["11"])
+    np.place(flip_array, flip_array == "99", ["22"])    
+
+    genarray[:, flip] = flip_array
+
+    return genarray
+
+
+def parsePed(ped_file, delim="\t", compound_geno="False"):
+    '''
+    Parse a plink .ped file into a dataframe
+
+    Arguments
+    ---------
+    ped_file: string
+      Path to a plink .ped file
+
+    delim: string
+      delimiter that separates columns
+      in ped_file
+
+    compound_geno: boolean
+      Whether alleles of genotype
+      are separated by a whitespace or not.
+
+    Returns
+    -------
+    ped_frame: pd.Core.DataFrame
+      pandas dataframe representation of
+      the ped_file.  Genotypes are presented
+      as a numpy array.
+
+    '''
+
+    samples = []
+
+    # parse the ped file, return a dataframe
+    with open(ped_file, "r") as pfile:
+        for indiv in pfile.readlines():
+            ped_dict = {}
+            indiv = indiv.strip("\n")
+            indiv_split = indiv.split(delim)
+            ped_dict["FID"] = indiv_split[0]
+            ped_dict["IID"] = indiv_split[1]
+            ped_dict["SEX"] = int(indiv_split[4])
+            ped_dict["PHEN"] = int(indiv_split[5])
+            ped_dict["GENOS"] = np.array(indiv_split[6:])
+            samples.append(ped_dict)
+
+    ped_frame = pd.DataFrame(samples)
+    
+    return ped_frame
+
+
+def countRiskAlleles(ped_frame, snp_index, report, flag):
+    '''
+    Count the number of risk alleles per individual
+    and calculate the probability of the phenotype
+
+    Arguments
+    ---------
+    ped_frame: pd.Core.DataFrame
+      Dataframe of SNP genotypes and phenotype information
+
+    snp_index: list
+      list of snp indices denoting which columns of
+      ped_frame are the relevant genotypes
+
+    report: string
+      either `cases_explained` - the proportion of cases
+      explained by risk allele carriage, or
+      `probability_phenotype` - the probability (frequency)
+      of the binary phenotype amongst all individuals given
+      the risk allele carriage
+
+    flag: boolean
+      output individuals explained by carriage of 2
+      risk alleles
+
+    Returns
+    -------
+    count_freq: np.ndarray
+      cumulative frequency array of #risk alleles
+    '''
+
+    case_freq = np.zeros(shape=len(snp_index)*2,
+                         dtype=np.float64)
+    cntrl_freq = np.zeros(shape=len(snp_index)*2,
+                          dtype=np.float64)
+
+    # group by phenotype column
+    phen_groups = ped_frame.groupby(by="PHEN")
+    for name, group in phen_groups:
+        genos = group.loc[:,snp_index]
+
+        # convert to 0,1,2 coding for ease of counting
+        # treat 00 as missing/NA
+        genos.replace({"22": 0,
+                       "12": 1,
+                       "11": 2,
+                       "00": np.nan},
+                      inplace=True)
+        risk_sums = np.nansum(genos, axis=1)
+
+        for val in risk_sums:
+            if name == 1:
+                cntrl_freq[val] += 1
+            elif name == 2:
+                case_freq[val] += 1
+
+    if flag:
+        explained = pd.DataFrame(risk_sums)
+        explained.index = group["FID"]
+        explained["IID"] = explained.index
+        explained.columns = ["IID", "riskAlleles"]
+        explained = explained[explained["riskAlleles"] == 2.0]
+        explained.to_csv("/".join([os.getcwd(), "cases_explained.tsv"]),
+                         sep="\t", index_label="FID")
+    else:
+        pass
+
+    if report == "cases_explained":
+        # express as the proportion of cases explained
+        cumulative = np.cumsum(case_freq)/np.nansum(case_freq)
+        freqs = case_freq/np.nansum(case_freq)
+    elif report == "probability_phenotype":
+        cumulative = np.cumsum(case_freq + cntrl_freq)/np.nansum(case_freq + cntrl_freq)
+        freqs = case_freq/(case_freq + cntrl_freq)
+
+    freqs[np.isnan(freqs)] = 0
+    E.info("Individuals with pheno 1: %i" % np.nansum(cntrl_freq))
+    E.info("Individuals with pheno 2: %i" % np.nansum(case_freq))
+
+    res_dict = {"freqs": freqs, "cumulative": cumulative,
+                "cases": case_freq,
+                "controls": cntrl_freq}
+
+    return res_dict
+
+
+def plotRiskFrequency(bins, frequencies, savepath=None):
+    '''
+    Generate a plot of #risk alleles vs.
+    P(binary phenotype).
+
+    Arguments
+    ---------
+    bins: list
+      list of histogram bins, i.e. #risk
+      alleles
+
+    frequencies: list
+      list of frequencies of binary phenotype
+      corresponding to #risk allele bins
+
+    Returns
+    -------
+    None - plot is generated
+    '''
+
+    hist_df = pd.DataFrame({"bins": bins,
+                            "freq": frequencies})
+
+    py2ri.activate()
+    R('''suppressPackageStartupMessages(library(ggplot2))''')
+    R('''suppressPackageStartupMessages(library(scales))''')
+
+    r_df = py2ri.py2ri_pandasdataframe(hist_df)
+    R.assign("hist.df", r_df)
+
+    R('''p_hist <- ggplot(hist.df, aes(x=bins, y=freq)) + '''
+      '''geom_point() + theme_bw() + '''
+      '''xlim(c(0, dim(hist.df)[1])) + ylim(c(0, 1)) + '''
+      '''labs(x="Number of Risk Alleles", '''
+      '''y="F(phenotype)")''')
+    
+    R('''png("%(savepath)s")''' % locals())
+    R('''print(p_hist)''')
+    R('''dev.off()''')
+
+    return hist_df
