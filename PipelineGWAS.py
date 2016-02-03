@@ -4353,15 +4353,15 @@ def fitPrior(value, distribution, dist_params):
     # distribution parameters should be passed
     # explicitly
     if distribution == "normal":
-        prior = 1 - stats.norm(*dist_params).cdf(value)
+        prior = stats.norm(*dist_params).pdf(value)
     elif distribution == "t":
-        prior = 1 - stats.t(*dist_params).cdf(value)
+        prior = stats.t(*dist_params).pdf(value)
     elif distribution == "gamma":
-        prior = 1 - stats.gamma(*dist_params).cdf(value)
+        prior = stats.gamma(*dist_params).pdf(value)
     elif distribution == "lognormal":
-        prior = 1 - stats.lognorm(*dist_params).cdf(value)
+        prior = stats.lognorm(*dist_params).pdf(value)
     elif distribution == "exponential":
-        prior = 1 - stats.expon(*dist_params).cdf(value)
+        prior = stats.expon(*dist_params).pdf(value)
     else:
         raise ValueError("Distrubtion %s not "
                          "implemented" % distribution)
@@ -4547,9 +4547,8 @@ def calculatePicsValues(snp_id, index_log10p, ld_values,
                 sigma = 0.0001
             else:
                 pass
-            likelihood = 1 - stats.norm(mu, sigma).cdf(index_log10p)
+            likelihood = stats.norm(mu, sigma).pdf(index_log10p)
             prior = priors[snp]
-            # prior = 1.0
             prob_dict[snp] = likelihood * prior
         except KeyError:
             E.warn("SNP %s not found in LD with %s" % (snp,

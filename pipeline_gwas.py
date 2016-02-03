@@ -2271,14 +2271,15 @@ def getGwasTopHits(infile, outfile):
     '''
 
     job_memory = "10G"
+    out_dir = "/".join(outfile.split("/")[:-1])
 
     statement = '''
     python /ifs/devel/projects/proj045/gwas_pipeline/assoc2assoc.py
     --task=get_hits
+    --output-directory=%(out_dir)s
     --log=%(outfile)s.log
     --p-threshold=0.00000001
     %(infile)s
-    | cut -f 7 > %(outfile)s
     '''
 
     P.run()
