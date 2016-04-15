@@ -95,6 +95,7 @@ Code
 
 """
 from ruffus import *
+from ruffus.combinatorics import *
 
 import sys
 import os
@@ -1620,7 +1621,7 @@ def pcAdjustedAssociation(infiles, outfile):
     --remove-individuals=%(remove)s
     --association-method=%(gwas_model)s
     --genotype-rate=0.1
-    --hardy-weinberg=0.000000000000001
+    --hardy-weinberg=1e-50
     --min-allele-frequency=0.001
     --output-file-pattern=%(out_pattern)s
     --memory=%(mem)s
@@ -1894,55 +1895,54 @@ def mergeGwasHits(infiles, outfile):
 
     P.run()
 
+# This takes too long and creates massive files, not necessary
+# @follows(mergeGwasHits)
+# @transform(mergeGwasHits,
+#            regex("epistasis.dir/(.+).bed"),
+#            add_inputs([r"epistasis.dir/\1.fam",
+#                        r"epistasis.dir/\1.bim"]),
+#            r"epistasis.dir/\1.epi.cc")
+# def screenEpistasis(infiles, outfile):
+#     '''
+#     Screen for epistatic interactions between
+#     target loci of interest using fast-epistasis.
+
+#     Specific interactions can be tested concretely
+#     once candidates are identified
+
+#     Only test SNPs with MAF >= 0.5%
+#     '''
+    
+#     bed_file = infiles[0]
+#     fam_file = infiles[1][0]
+#     bim_file = infiles[1][1]
+#     plink_files = ",".join([bed_file, fam_file, bim_file])
+
+#     out_pattern = ".".join(outfile.split(".")[:-2])
+#     job_memory = "1G"
+#     job_threads = 11
+
+#     statement = '''
+#     python /ifs/devel/projects/proj045/gwas_pipeline/geno2assoc.py
+#     --program=plink2
+#     --input-file-format=plink_binary
+#     --method=epistasis
+#     --epistasis-method=fast_epistasis
+#     --epistasis-parameter=joint-effects
+#     --min-allele-freq=0.005
+#     --epistasis-threshold=%(epistasis_threshold)s
+#     --epistasis-report-threshold=%(epistasis_reporting)s
+#     --output-file-pattern=%(out_pattern)s
+#     --log=%(outfile)s.log
+#     --threads=%(job_threads)s
+#     %(plink_files)s
+#     > %(outfile)s.plink.log
+#     '''
+
+#     P.run()
+
 
 @follows(mergeGwasHits)
-@transform(mergeGwasHits,
-           regex("epistasis.dir/(.+).bed"),
-           add_inputs([r"epistasis.dir/\1.fam",
-                       r"epistasis.dir/\1.bim"]),
-           r"epistasis.dir/\1.epi.cc")
-def screenEpistasis(infiles, outfile):
-    '''
-    Screen for epistatic interactions between
-    target loci of interest using fast-epistasis.
-
-    Specific interactions can be tested concretely
-    once candidates are identified
-
-    Only test SNPs with MAF >= 0.5%
-    '''
-    
-    bed_file = infiles[0]
-    fam_file = infiles[1][0]
-    bim_file = infiles[1][1]
-    plink_files = ",".join([bed_file, fam_file, bim_file])
-
-    out_pattern = ".".join(outfile.split(".")[:-2])
-    job_memory = "1G"
-    job_threads = 11
-
-    statement = '''
-    python /ifs/devel/projects/proj045/gwas_pipeline/geno2assoc.py
-    --program=plink2
-    --input-file-format=plink_binary
-    --method=epistasis
-    --epistasis-method=fast_epistasis
-    --epistasis-parameter=joint-effects
-    --min-allele-freq=0.005
-    --epistasis-threshold=%(epistasis_threshold)s
-    --epistasis-report-threshold=%(epistasis_reporting)s
-    --output-file-pattern=%(out_pattern)s
-    --log=%(outfile)s.log
-    --threads=%(job_threads)s
-    %(plink_files)s
-    > %(outfile)s.plink.log
-    '''
-
-    P.run()
-
-
-@follows(mergeGwasHits,
-         screenEpistasis)
 @transform(mergeGwasHits,
            regex("epistasis.dir/(.+).bed"),
            add_inputs([r"epistasis.dir/\1.fam",
@@ -1985,6 +1985,103 @@ def testEpistasisVsRegion(infiles, outfile):
 
     P.run()
 
+############################################
+# We want to test for epistasis explicitly between target region variants
+# and all others whilst adjusting for covariats and removing sources of
+# type I error.
+# This means for each target region variant any SNPs in LD must be removed.
+# So first create lists of variants, for each target variant, that are NOT
+# in LD.  These will be selected using Plink to generate the relevant
+# files for analysis
+
+# get the list of region SNPs first and create a dummy file for each
+@follows(testEpistasisVsRegion,
+         mkdir("target_snps.dir"))
+@subdivide("%s" % PARAMS['epistasis_set'],
+           regex("epistasis.dir/(.+).set"),
+           r"epistasis.dir/split_snps.text")
+def splitTargetVariants(infile, outfile):
+    '''
+    Generate a dummy file for each variant in the
+    set file
+    '''
+
+    job_memory = "0.5G"
+    statement = '''
+    cat %(infile)s | grep -v "END" | awk '{if(NR > 1) {printf("target_snps.dir/%%s.target\\n", $1)}}'
+    | awk '{system("touch " $0)}';
+    '''
+
+    P.run()
+    P.touch(outfile)
+
+
+@follows(splitTargetVariants)
+@transform("target_snps.dir/*",
+           regex("target_snps.dir/(.+).target"),
+           r"target_snps.dir/\1.exclude")
+def excludeLdVariants(infile, outfile):
+    '''
+    Extract the variants in LD with target variant
+    to exclude from epistasis analysis
+    '''
+
+    contig = PARAMS['candidate_chromosome'].lstrip("chr")
+    ld_dir = os.path.join(os.getcwd(), "ld.dir")
+    ld_files = [lf for lf in os.listdir(ld_dir) if re.search(contig, lf)]
+    ld_fle = [os.path.join(ld_dir, bg) for bg in ld_files if re.search("bgz$", bg)][0]
+
+    snp = infile.split("/")[-1].split(".")[0]
+    job_memory = "2G"
+
+    statement = '''tabix %(ld_fle)s %(contig)s:89500000-90354753 | 
+    grep %(snp)s | awk '{ print } END {if (!NR) {print "Empty"} else {if($7 > 0.1) { print }}}'
+    | cut -f 3,6 | tr -s '\\t' '\\n' | tr -s ';' '\\n' | sort | uniq | grep -v %(snp)s
+    > %(outfile)s
+    '''
+
+    P.run()
+
+
+@follows(splitTargetVariants,
+         excludeLdVariants)
+@transform(mergeGwasHits,
+           regex("epistasis.dir/(.+).bed"),
+           add_inputs([r"epistasis.dir/\1.fam",
+                       r"epistasis.dir/\1.bim",
+                       mergeExclusions]),
+         r"epistasis.dir/\1.raw")
+def convertToRawFormat(infiles, outfile):
+    '''
+    Convert binary genotype information into .raw format,
+    useful for reading in as tab delimited text files
+    '''
+
+    bed_file = infiles[0]
+    fam_file = infiles[1][0]
+    bim_file = infiles[1][1]
+    plink_files = ",".join([bed_file, fam_file, bim_file])
+    
+    exclusions = infiles[1][2]
+
+    out_pattern = ".".join(outfile.split(".")[:-1])
+    job_memory = "30G"
+    
+    statement = '''
+    python /ifs/devel/projects/proj045/gwas_pipeline/geno2assoc.py
+    --program=plink2
+    --input-file-format=plink_binary
+    --method=format
+    --format-method=change_format
+    --reformat-type=raw
+    --keep-individuals=%(gwas_keep)s
+    --remove-individuals=%(exclusions)s
+    --output-file-pattern=%(out_pattern)s
+    --memory=%(job_memory)s
+    %(plink_files)s
+    '''
+    
+    P.run()
 
 # ----------------------------------------------------------------------------------------#
 # ----------------------------------------------------------------------------------------#
@@ -2941,7 +3038,7 @@ def splitConditionalRegions(infile, outfile):
     statement = '''
     python /ifs/devel/projects/proj045/gwas_pipeline/assoc2assoc.py
     --task=get_hits
-    --p-threshold=0.00000001
+    --p-threshold=0.000001
     --output-directory=%(out_dir)s
     --log=%(outfile)s.log
     %(infile)s

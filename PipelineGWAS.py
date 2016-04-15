@@ -21,9 +21,6 @@ from rpy2.robjects import pandas2ri as py2ri
 from rpy2.robjects.packages import importr
 # set matplotlib non-interactive backend to Agg to
 # allow running on cluster
-import matplotlib
-import matplotlib.pyplot as plt
-from ggplot import *
 import collections
 import sqlite3 as sql
 from math import *
@@ -1408,7 +1405,8 @@ class Plink2(GWASProgram):
         task_map = {'change_format': {"plink_binary": " --make-bed ",
                                       "plink": " --recode ",
                                       "oxford": " --recode oxford ",
-                                      "oxford_binary": " --recode oxford gen-gz "},
+                                      "oxford_binary": " --recode oxford gen-gz ",
+                                      "raw": " --recode A tabx "},
                     "change_missing_values": {"genotype": " --missing-genotype %s ",
                                               "phenotype": " --missing-phenotype %s "},
                     "update_variants": {"variant_ids": " --set-missing-var-ids %s ",
@@ -2375,16 +2373,19 @@ class GWASResults(object):
         all SNPs with association p-values less than
         a certain threshold.  Defaults is genome-wide
         signifance, p < 1x10-8.
-        Then select region +/- 0.5Mb of the index SNP.
+        Then select region +/- 1.5Mb of the index SNP.
         '''
 
         hits_df = self.results[self.results["P"] <= threshold]
-        # find the range of SNPs with 0.5Mb of each index SNP
+        # find the range of SNPs with 3Mb of each index SNP
         contig_group = hits_df.groupby(["CHR"])
 
         # there may be multiple independent hits on a given
         # chromosome.  Need to identify independent regions.
-        # Base this on distance?
+        # Independent regions are defined by their statistical
+        # independence, not distance.  Just take all SNPs
+        # in 3Mb of the lead SNP for each signal
+        # this will create overlaps of associatation signals
         for contig, region in contig_group:
             region.index = region["BP"]
             chr_df = self.results[self.results["CHR"] == contig]
@@ -2411,8 +2412,8 @@ class GWASResults(object):
                     locus.sort_values(by="CHISQ", inplace=True)
 
                 index_bp = locus.iloc[0]["BP"]
-                left_end = min(chr_df.loc[chr_df.index >= index_bp - 500000, "BP"])
-                right_end = max(chr_df.loc[chr_df.index <= index_bp + 500000, "BP"])
+                left_end = min(chr_df.loc[chr_df.index >= index_bp - 1500000, "BP"])
+                right_end = max(chr_df.loc[chr_df.index <= index_bp + 1500000, "BP"])
        
                 range_df = chr_df.loc[left_end : right_end, :]
 
@@ -5391,7 +5392,7 @@ def countRiskAlleles(ped_frame, snp_index, report, flag):
     return res_dict
 
 
-def plotRiskFrequency(bins, frequencies, savepath=None):
+def plotRiskFrequency(bins, frequencies, savepath=None, ytitle=None):
     '''
     Generate a plot of #risk alleles vs.
     P(binary phenotype).
@@ -5425,7 +5426,7 @@ def plotRiskFrequency(bins, frequencies, savepath=None):
       '''geom_point() + theme_bw() + '''
       '''xlim(c(0, dim(hist.df)[1])) + ylim(c(0, 1)) + '''
       '''labs(x="Number of Risk Alleles", '''
-      '''y="F(phenotype)")''')
+      '''y="%(ytitle)s")''' % locals())
     
     R('''png("%(savepath)s")''' % locals())
     R('''print(p_hist)''')

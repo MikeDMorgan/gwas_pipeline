@@ -188,7 +188,8 @@ def main(argv=None):
                       help="formatting parameter, where appropriate")
 
     parser.add_option("--reformat-type", dest="reformat", type="choice",
-                      choices=["plink", "plink_binary", "oxford", "oxford_binary"],
+                      choices=["plink", "plink_binary", "oxford", "oxford_binary",
+                               "raw"],
                       help="new format of input files to be reformatted to")
 
     parser.add_option("--apply-missing", dest="apply_missing", type="choice",
