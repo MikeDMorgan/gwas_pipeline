@@ -102,9 +102,11 @@ def main(argv=None):
                 top_reg = top_reg.sort_values(by="T",
                                               ascending=False)
                 top_bp = top_reg.iloc[0]["BP"]
+                top_snp = top_reg.iloc[0]["SNP"]
 
             outname = "_".join(["chr%s" % str(name),
                                 str(top_bp),
+                                top_snp,
                                 "significant"])
 
             outfile = outname + ".tsv"

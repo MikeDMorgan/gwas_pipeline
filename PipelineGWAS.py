@@ -4377,7 +4377,8 @@ def calcPriorsOnSnps(snp_list, distribution, params=None):
     parameters to describe the distribution.
     This relies inherently on the correct and
     appropriate distribution to be defined, i.e.
-    that it is conjugate to the likelihood function.
+    that it is conjugate to the marginal likelihood
+    distribution.
     TO DO: introduce robust Bayesian modelling
 
     Arguments
@@ -4400,7 +4401,7 @@ def calcPriorsOnSnps(snp_list, distribution, params=None):
     '''
 
     prior_probs = {}
-    # if their is no score for that SNP then use an
+    # if there is no score for that SNP then use an
     # uninformative or Jeffrey's prior
     for snp in snp_list.keys():
         if snp_list[snp] != 0:
@@ -4480,7 +4481,7 @@ def calculatePicsValues(snp_id, index_log10p, ld_values,
     This method allows the prioritisation of SNPs, including
     those where there are multiple independent signals.  It
     requires that these independent signals are however
-    input as seperate SNPs.
+    input as separate SNPs.
 
     NB::
       Fahr et al initially use k=6.4 based on their observation
@@ -4548,9 +4549,12 @@ def calculatePicsValues(snp_id, index_log10p, ld_values,
                 sigma = 0.0001
             else:
                 pass
-            likelihood = stats.norm(mu, sigma).pdf(index_log10p)
-            prior = priors[snp]
-            prob_dict[snp] = likelihood * prior
+            # use log likelihoods, these are more numerically
+            # stable and avoid the multiplication of very small
+            # numbers
+            likelihood = np.log(stats.norm(mu, sigma).pdf(index_log10p))
+            prior = np.log(priors[snp])
+            prob_dict[snp] = np.exp(likelihood + prior)
         except KeyError:
             E.warn("SNP %s not found in LD with %s" % (snp,
                                                        snp_id))
@@ -5433,3 +5437,4 @@ def plotRiskFrequency(bins, frequencies, savepath=None, ytitle=None):
     R('''dev.off()''')
 
     return hist_df
+

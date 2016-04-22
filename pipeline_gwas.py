@@ -2083,6 +2083,11 @@ def convertToRawFormat(infiles, outfile):
     
     P.run()
 
+# the raw file is huge! Need to read it in chunks, test for epistasis
+# and cache the results, discarding everything else to preserve memory
+
+
+
 # ----------------------------------------------------------------------------------------#
 # ----------------------------------------------------------------------------------------#
 # ----------------------------------------------------------------------------------------#
