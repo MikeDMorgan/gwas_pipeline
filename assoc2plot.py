@@ -90,7 +90,7 @@ def main(argv=None):
 
     # only output appended results for Manhattan plot, not qqplot
     try:
-        df.to_csv(options.stdout, sep="\t", index=False, index_col=None)
+        df.to_csv(options.stdout, sep="\t", index_col=None)
     except UnboundLocalError:
         pass
 

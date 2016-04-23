@@ -55,7 +55,8 @@ def main(argv=None):
 
     parser.add_option("--score-method", dest="method", type="choice",
                       choices=["PICS", "LDscore", "ABF", "R2_rank",
-                               "get_eigen", "calc_prior"],
+                               "get_eigen", "calc_prior", "credible_set",
+                               "summarise"],
                       help="SNP scoring/prioritisation method to apply.")
 
     parser.add_option("--database", dest="database", type="string",
@@ -117,6 +118,18 @@ def main(argv=None):
     parser.add_option("--distribution-parameters", dest="dist_params", type="string",
                       help="distribution parameters as a comma-separated list")
 
+    parser.add_option("--lead-snp-id", dest="lead_snp", type="int",
+                      help="0-based item number in filename")
+
+    parser.add_option("--filename-separator", dest="separator", type="string",
+                      help="filename separator to extract information")
+
+    parser.add_option("--snp-column", dest="snp_col", type="int",
+                      help="0-based index of SNP ID column number")
+
+    parser.add_option("--probability-column", dest="prob_col", type="int",
+                      help="0-based index of posterior probabilities column"
+                      " number")
 
     parser.set_defaults(ld_dir=None,
                         dist="normal",
@@ -130,6 +143,10 @@ def main(argv=None):
                         database=None,
                         table=None,
                         flat_prior=False,
+                        lead_snp=2,
+                        separator="_",
+                        snp_col=0,
+                        prob_col=1,
                         )                        
                         
     # add common options (-h/--help, ...) and parse command line
@@ -137,14 +154,17 @@ def main(argv=None):
 
     infile = argv[-1]
 
-    peek = pd.read_table(infile, nrows=5, sep="\s*", header=0)
-    try:
-        if len(peek["TEST"] != "ADD"):
-            clean = False
-        else:
+    if len(infile.split(",")) > 1:
+        pass
+    else:
+        peek = pd.read_table(infile, nrows=5, sep="\s*", header=0)
+        try:
+            if len(peek["TEST"] != "ADD"):
+                clean = False
+            else:
+                clean = True
+        except KeyError:
             clean = True
-    except KeyError:
-        clean = True
 
     if options.method == "LDscore":
         snpscores = gwas.snpPriorityScore(gwas_results=infile,
@@ -238,7 +258,6 @@ def main(argv=None):
         snpscores = gwas.ABFScore(gwas_results=infile,
                                   region_size=options.map_window,
                                   chromosome=options.chromosome,
-                                  set_interval=options.interval,
                                   prior_variance=options.prior_var,
                                   clean=clean)
     elif options.method == "get_eigen":
@@ -247,6 +266,21 @@ def main(argv=None):
                                         bim_file=infile,
                                         snp_file=options.snp_set)
         snpscores = pd.DataFrame(snpscores).T
+
+    elif options.method == "credible_set":
+        E.info("Creating credible set")
+        
+        snpscores = gwas.makeCredibleSet(probs_file=infile,
+                                         credible_set=options.interval,
+                                         lead_snp_indx=options.lead_snp,
+                                         filename_sep=options.separator,
+                                         snp_column=options.snp_col,
+                                         probs_column=options.prob_col)
+
+    elif options.method == "summarise":
+        E.info("Collating SNP prioritisation resuslts")
+        file_list = infile.split(",")
+        snpscores = gwas.summariseResults(file_list=file_list)
 
     snpscores.to_csv(options.stdout, index_label="SNP",
                      sep="\t")

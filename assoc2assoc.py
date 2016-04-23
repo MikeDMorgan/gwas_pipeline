@@ -96,6 +96,7 @@ def main(argv=None):
                     top_reg = top_reg.sort_values(by="STAT",
                                                   ascending=False)
                     top_bp = top_reg.iloc[0]["BP"]
+                    top_snp = top_reg.iloc[0]["SNP"]
             except KeyError:
                 top_reg = region
                 top_reg.loc[:, "STAT"] = abs(top_reg["T"])

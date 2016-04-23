@@ -3015,7 +3015,7 @@ def splitGwasRegions(infile, outfile):
     statement = '''
     python /ifs/devel/projects/proj045/gwas_pipeline/assoc2assoc.py
     --task=get_hits
-    --p-threshold=0.00000001
+    --p-threshold=0.00000005
     --output-directory=%(out_dir)s
     --log=%(outfile)s.log
     %(infile)s
@@ -3072,14 +3072,12 @@ def makeSnpSets(infile, outfile):
     P.run()
 
 
-@follows(splitGwasRegions,
-         splitConditionalRegions,
-         makeSnpSets,
+@follows(makeSnpSets,
          mkdir("scores.dir"))
 @transform(makeSnpSets,
-           regex("snpsets.dir/(.+)_(.+).snpset"),
-           add_inputs(r"%s/\1impv1.bim" % PARAMS['functional_bim_dir']),
-           r"scores.dir/\1_\2_scores.tsv")
+           regex("snpsets.dir/chr(\d+)_(\d+)_(.+).snpset"),
+           add_inputs(r"%s/chr\1impv1.bim" % PARAMS['functional_bim_dir']),
+           r"scores.dir/chr\1_\2_\3_scores.tsv")
 def getSnpFunctionalScores(infiles, outfile):
     '''
     Retrieve functional scores associated with
@@ -3137,6 +3135,57 @@ def calcPicsScores(infiles, outfile):
     --ld-threshold=0.5
     --log=%(outfile)s.log
     %(snp_file)s
+    > %(outfile)s
+    '''
+
+    P.run()
+
+@follows(calcPicsScores,
+         mkdir("credible_sets.dir"))
+@transform(calcPicsScores,
+           regex("candidate_snps.dir/(.+)_PICS.tsv"),
+           r"credible_sets.dir/\1_PICS.tsv")
+def makePicsCredibleSet(infile, outfile):
+    '''
+    Create an 80% credible set from the PICS
+    posterior probabilities
+    '''
+
+    job_memory = "1G"
+
+    statement = '''
+    python /ifs/devel/projects/proj045/gwas_pipeline/snpPriority.py
+    --score-method=credible_set
+    --credible-interval=0.95
+    --lead-snp-id=2
+    --filename-separator="_"
+    --snp-column=0
+    --probability-column=1
+    --log=%(outfile)s.log
+    %(infile)s
+    > %(outfile)s
+    '''
+
+    P.run()
+
+
+@follows(makePicsCredibleSet)
+@collate(makePicsCredibleSet,
+         regex("credible_sets.dir/(.+)_PICS.tsv"),
+         r"credible_sets.dir/PICS.table")
+def summarisePicsResults(infiles, outfile):
+    '''
+    Summarise and tabulate the results from
+    PICS prioritisation
+    '''
+
+    infiles = ",".join(infiles)
+
+    statement = '''
+    python /ifs/devel/projects/proj045/gwas_pipeline/snpPriority.py
+    --score-method=summarise
+    --log=%(outfile)s.log
+    %(infiles)s
     > %(outfile)s
     '''
 
@@ -3217,10 +3266,7 @@ def calcTop1pcLdRanks(infile, outfile):
 def calcApproxBayesFactorScore(infile, outfile):
     '''
     Calculate the approximate Bayes Factor for fine-mapped
-    region SNPs - returns a credible set of SNPs
-    that explain ~99% of the posterior probability
-    of association in a 200kb window around the lead
-    SNP.
+    region SNPs - returns the
     '''
 
     table = outfile.split("/")[-1].split("_")[0]
@@ -3232,10 +3278,61 @@ def calcApproxBayesFactorScore(infile, outfile):
     --chromosome=%(chrome)s
     --flat-prior
     --prior-variance=0.04
-    --credible-interval=0.99
-    --fine-map-window=500000
+    --fine-map-window=1500000
     --log=%(outfile)s.log
     %(infile)s
+    > %(outfile)s
+    '''
+
+    P.run()
+
+
+@follows(calcApproxBayesFactorScore,
+         mkdir("credible_sets.dir"))
+@transform(calcApproxBayesFactorScore,
+           regex("candidate_snps.dir/(.+)_ABF.tsv"),
+           r"credible_sets.dir/\1_ABF.tsv")
+def makeAbfCredibleSet(infile, outfile):
+    '''
+    Create an 95% credible set from the ABF
+    posterior probabilities
+    '''
+
+    job_memory = "1G"
+
+    statement = '''
+    python /ifs/devel/projects/proj045/gwas_pipeline/snpPriority.py
+    --score-method=credible_set
+    --credible-interval=0.95
+    --lead-snp-id=2
+    --filename-separator="_"
+    --snp-column=0
+    --probability-column=2
+    --log=%(outfile)s.log
+    %(infile)s
+    > %(outfile)s
+    '''
+
+    P.run()
+
+
+@follows(makeAbfCredibleSet)
+@collate(makeAbfCredibleSet,
+         regex("credible_sets.dir/(.+)_ABF.tsv"),
+         r"credible_sets.dir/ABF.table")
+def summariseAbfResults(infiles, outfile):
+    '''
+    Summarise and tabulate the results from
+    approximate Bayes factor prioritisation
+    '''
+
+    infiles = ",".join(infiles)
+
+    statement = '''
+    python /ifs/devel/projects/proj045/gwas_pipeline/snpPriority.py
+    --score-method=summarise
+    --log=%(outfile)s.log
+    %(infiles)s
     > %(outfile)s
     '''
 

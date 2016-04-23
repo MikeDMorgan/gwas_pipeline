@@ -4857,7 +4857,7 @@ def calcApproxBayesFactor(log_or, standard_error,
     '''
     Calculate the approximate Bayes Factor (ABF) from Wakefield 
     Am. J. Hum. Genet.(2015) for a SNP.  The ABF is calculated
-    from the effect size (log OR), variance (Standard error)
+    from the effect size (log OR), variance (Standard error ^2)
     and a prior weight on the variance (W).
 
     Arguments
@@ -4880,23 +4880,24 @@ def calcApproxBayesFactor(log_or, standard_error,
       The calculated Approximate Bayes Factor
     '''
 
-    _top = sqrt(prior_variance/(prior_variance + standard_error))
-    _exp_top = (log_or ** 2) * prior_variance
-    _exp_denom = (2 * standard_error) * (standard_error + prior_variance)
+    # the variance on the MLE log OR is the squared standard error
+    variance = standard_error ** 2
+    _top = sqrt((prior_variance + variance)/variance)
+    _exp_left = -((log_or ** 2)/variance)/2.0
+    _exp_right = prior_variance/(prior_variance + variance)
 
-    ABF = _top * exp(_exp_top/_exp_denom)
+    ABF = _top * exp(_exp_left * _exp_right)
 
     return ABF
 
 
 def ABFScore(gwas_results, region_size, chromosome,
-             set_interval=0.99, prior=None,
+             prior=None,
              prior_variance=0.04, clean=True):
     '''
-    Using approximate Bayes factors generate a N% credible set
-    of candidate causal SNPs at a locus that capture N%
-    of the posterior probability of driving the association
-    signal.
+    Using approximate Bayes factors calculate the posterior
+    association signal for each variant.  Credible intervals
+    will be constructed later.
 
     Arguments
     ---------
@@ -4908,10 +4909,6 @@ def ABFScore(gwas_results, region_size, chromosome,
       association signal index SNP - taken as the
       fine-mapping region. Region is index bp +/-
       region_size/2
-
-    set_interval: float
-      The proportion of the posterior probability explained
-      by the set of SNPs
 
     chromosome: string
       A chromosome to select from the gwas_results
@@ -4932,9 +4929,9 @@ def ABFScore(gwas_results, region_size, chromosome,
 
     Returns
     -------
-    credible_set: pandas.Core.DataFrame
-      The credible set of SNPs with their approximate Bayes
-      Factors and posterior probabilities
+    out_df: pandas.Core.DataFrame
+      All input SNPs in the fine-mapping interval with their
+      approximate Bayes Factors and posterior probabilities
     '''
 
     E.info("Reading association results from %s" % gwas_results)
@@ -4974,10 +4971,11 @@ def ABFScore(gwas_results, region_size, chromosome,
     E.info("calculating standard errors from association "
            "p-values")
     index_snp = chr_df.iloc[0]["SNP"]
+    E.info("The lead SNP is {}".format(index_snp))
     index_bp = chr_df.iloc[0]["BP"]
-    z_func = lambda x: - 0.862 + sqrt(0.743 - 2.404 * np.log(x))
-    chr_df["Z"] = chr_df["P"].apply(z_func)
-    chr_df["SE"] = abs(np.log(chr_df["OR"])/chr_df["Z"])
+    z_func = lambda x: - 0.862 + sqrt(0.743 - (2.404 * np.log(x)))
+    chr_df["Z"] = abs(chr_df["P"].apply(z_func))
+    chr_df["SE"] = np.log(chr_df["OR"])/abs(chr_df["Z"])
 
     start = index_bp - region_size/2
     end = index_bp + region_size/2
@@ -4997,6 +4995,19 @@ def ABFScore(gwas_results, region_size, chromosome,
     # each SNP
     E.info("calculating approximate Bayes Factors")
     bayes = {}
+
+    # test overriding the prior on the variance
+    # use the standard error on the medina log OR
+
+    med_logor = np.log(np.median(sig_df["OR"]))
+    std_logor = np.std(np.log(sig_df["OR"]))
+    prior_variance = std_logor/np.sqrt(sig_df.shape[0])
+
+    E.info("The prior variance for this fine-mapping"
+           " interval is {}, and the median log OR"
+           " is {:f}".format(prior_variance,
+                             med_logor))
+
     for snp in sig_df.index:
         logor = np.log(sig_df.loc[snp]["OR"])
         se = abs(sig_df.loc[snp]["SE"])
@@ -5019,34 +5030,27 @@ def ABFScore(gwas_results, region_size, chromosome,
     posteriors.sort_values(ascending=False,
                            inplace=True)
 
-    E.info("Finding %0.3f%% credible set" % set_interval)
-    prob_set = 0.0
-    cred_set = set()
     # side effect - write all ABFs and Posteriors out to file
     out_df = pd.DataFrame({"Posterior": posteriors,
                            "ApproxBayesFactor": bayes_rank,
                            "SNP": posteriors.index})
+    out_df.index = out_df["SNP"]
+    out_df.drop(["SNP"], axis=1, inplace=True)
+    out_df.sort(["Posterior"], inplace=True, ascending=False)
 
-    out_df.to_csv("/ifs/projects/proj045/pipeline_gwas/ABFs_test.tsv",
-                  sep="\t", index=0)
+    index_bayes = out_df.loc[index_snp]["ApproxBayesFactor"]
+    index_p = sig_df.loc[index_snp]["log10P"]
+    index_or = sig_df.loc[index_snp]["OR"]
+    index_se = sig_df.loc[index_snp]["SE"]
 
-    for xsnp in bayes_rank.index:
-        prob_set += posteriors.loc[xsnp]
-        cred_set.add(xsnp)
-        if prob_set >= set_interval:
-            break
-        else:
-            continue
+    E.info("Bayes factor for lead SNP {} is {}, "
+           "p-value {}, OR {} and SE {}".format(index_snp,
+                                                index_bayes,
+                                                index_p,
+                                                index_or,
+                                                index_se))
 
-    credible_posterior = posteriors.loc[cred_set]
-    credible_bayes = bayes_rank.loc[cred_set]
-    cred_dict = {"Posterior": credible_posterior,
-                 "ApproxBayesFactor": credible_bayes}
-    credible_set = pd.DataFrame(cred_dict)
-    credible_set.sort_values(by="Posterior", inplace=True,
-                             ascending=False)
-
-    return credible_set
+    return out_df
 
 
 def getSnpIds(snp_set):
@@ -5438,3 +5442,189 @@ def plotRiskFrequency(bins, frequencies, savepath=None, ytitle=None):
 
     return hist_df
 
+
+def makeCredibleSet(probs_file, credible_set=0.95, lead_snp_indx=2,
+                    filename_sep="_", snp_column=0, probs_column=1):
+    '''
+    Construct an N% credible set from a list of
+    SNPs with posterior probabilities attached.
+
+    If the top SNP has posterior prob >= 80%, then just this SNP
+    will be output.
+
+    Otherwise the N% credible set is output.
+
+    In addition to the output credible set, this function
+    also outputs several pieces of important information for
+    the credible set:
+    * The lead SNP
+    * The SNP with the highest posterior probability, and whether
+      this is also the lead SNP
+    * The size of the credible set
+
+    Arguments:
+    ----------
+    probs_file: string
+      Path to a file containing SNP IDs and probabilities. It
+      must have these two columns, any others are optional and
+      will be ignored
+
+    credible_set: float
+      percentage of posterior probability signal to capture in
+      the credible set
+
+    lead_snp_indx: int
+      0-based index of the lead SNP for the associated region.
+      Used in the output file name and summary information
+
+    filename_sep: string
+      single character delimiter in the filename that can be
+      used to extract the information, i.e. chromosome, position
+      and lead SNP.
+
+    snp_column: int
+      0-based column number in the input file containing SNP
+      IDs.
+
+    probs_column: int
+      1-based column number in the input file containing the
+      posterior probabilities
+
+    Returns:
+    --------
+    posterior_set: pandas.Core.DataFrame
+      data frame of the N% credible set containing SNP IDs and posterior
+      probabilities
+    '''
+
+    df = pd.read_table(probs_file,
+                       index_col=None, sep="\t",
+                       header=None)
+    prob_df = df.iloc[:, [snp_column, probs_column]]
+    prob_df.columns = ["SNP", "Posterior"]
+
+    # some files may have header, others may not
+    if prob_df.iloc[0, 0] == "SNP":
+        prob_df = prob_df.iloc[1:, :]
+    else:
+        pass
+
+    # check probabilities have been properly interpreted as floats
+    #prob_df["Posterior"].astype(np.float64)
+    prob_df.loc[:, "Posterior"] = pd.to_numeric(prob_df["Posterior"])
+
+    # need to allow for non-rs IDs. check length of split file name
+    # expectation is 4, if longer then 2-5 together
+    split_name = probs_file.split("/")[-1].split(filename_sep)
+    if len(split_name) > 4:
+        lead_snp = filename_sep.join(split_name[lead_snp_indx:-1])
+    else:
+        lead_snp = split_name[lead_snp_indx]
+    E.info("Lead SNP is {}".format(lead_snp))
+
+    # sort by posterior signal then create credible set
+    prob_df.sort(["Posterior"], inplace=True,
+                 ascending=False)
+
+    top_snp = prob_df.iloc[0, 0]
+    top_prob = prob_df.iloc[0, 1]
+
+    E.info("Top posterior signal SNP is {} with P = {}".format(top_snp,
+                                                               top_prob))
+    if top_snp == lead_snp:
+        E.info("Lead SNP is the same as top posterior signal SNP")
+    else:
+        pass
+        
+    # often if the top SNP posterior probability is >= 80%
+    # the remaining variants have extremely small probs
+    # in that case we're only practically interested in the
+    # top variant
+
+    if top_prob >= 0.8:
+        posterior_set = prob_df[:1]
+        posterior_set.index = posterior_set.loc[:, "SNP"]
+        posterior_set.drop(["SNP"], inplace=True, axis=1)
+        E.info("Size of {}% credible set: 1".format(credible_set * 100))
+    else:
+        set_indx = []
+        prob_set = 0.0
+        for ix in range(len(prob_df.index)):
+            prob_set += prob_df.iloc[ix, 1]
+            set_indx.append(ix)
+            if prob_set >= credible_set:
+                break
+            else:
+                continue
+
+        posterior_set = prob_df.iloc[set_indx]
+        posterior_set.index = posterior_set.iloc[:, 0]
+        posterior_set = pd.DataFrame(posterior_set.iloc[:, 1])
+        posterior_set.columns = ["Posterior"]
+        E.info("Size of {}% credible set: {}".format(credible_set * 100,
+                                                     posterior_set.shape[0]))
+
+    return posterior_set
+                                                 
+
+def summariseResults(file_list):
+    '''
+    Take a list of files from SNP prioritsation
+    and collate into a single table
+
+    Arguments
+    ---------
+    file_list: list
+      list container of input files to collate
+      into the results table. File names are expected
+      to follow the format:
+      <contig>_<position>_<lead_snp>_<method>.tsv
+
+    Returns:
+    --------
+    summary_table: pandas.Core.DataFrame
+      pandas dataframe with columns:
+      * lead SNP
+      * credible set size
+      * top set SNP
+      * top set SNP probability
+      * chromosome
+      * lead SNP position
+    '''
+
+    # extract info from file name
+    # read in file as temporary dataframe
+    # extract info into a dictionary
+    # convert dict into a dataframe
+
+    name_re = re.compile(r"(?P<contig>\w{2,5})_(?P<position>\d+)_(?P<snp_id>\w+)_(?P<method>\w+).tsv")
+
+    snp_dicts = []
+
+    for path in file_list:
+        filename = re.search(name_re, path.split("/")[-1])
+        contig = filename.group("contig")
+        position = filename.group("position")
+        snp_id = filename.group("snp_id")
+
+        with open(path, "r") as ofile:
+            lines = ofile.readlines()
+            components = [xl.split("\t") for xl in lines[1:]]
+            # snp id is index 0 in first component
+            top_snp = components[0][0]
+            top_prob = components[0][1].rstrip("\n")
+            size = len(components)
+
+        file_dict = {"Lead_SNP": snp_id,
+                     "Credible_set_size": size,
+                     "Top_set_SNP": top_snp,
+                     "Top_set_prob": top_prob,
+                     "Chr": contig,
+                     "Position": position}
+        snp_dicts.append(file_dict)
+
+    summary_table = pd.DataFrame(snp_dicts, index=range(len(snp_dicts)))
+    summary_table.index = summary_table["Lead_SNP"]
+    summary_table.drop(["Lead_SNP"], axis=1, inplace=True)
+
+    return summary_table
