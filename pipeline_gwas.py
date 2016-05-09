@@ -2049,19 +2049,18 @@ def excludeLdVariants(infile, outfile):
            regex("epistasis.dir/(.+).bed"),
            add_inputs([r"epistasis.dir/\1.fam",
                        r"epistasis.dir/\1.bim",
-                       mergeExclusions]),
+                       r"exclusions.dir/WholeGenome.gwas_exclude"]),
          r"epistasis.dir/\1.raw")
 def convertToRawFormat(infiles, outfile):
     '''
-    Convert binary genotype information into .raw format,
-    useful for reading in as tab delimited text files
+    Extract the target SNP genotypes in raw format
+    to merge with the covariates file
     '''
 
     bed_file = infiles[0]
     fam_file = infiles[1][0]
     bim_file = infiles[1][1]
     plink_files = ",".join([bed_file, fam_file, bim_file])
-    
     exclusions = infiles[1][2]
 
     out_pattern = ".".join(outfile.split(".")[:-1])
@@ -2076,6 +2075,7 @@ def convertToRawFormat(infiles, outfile):
     --reformat-type=raw
     --keep-individuals=%(gwas_keep)s
     --remove-individuals=%(exclusions)s
+    --extract-snps=%(epistasis_set)s
     --output-file-pattern=%(out_pattern)s
     --memory=%(job_memory)s
     %(plink_files)s
@@ -2083,10 +2083,90 @@ def convertToRawFormat(infiles, outfile):
     
     P.run()
 
-# the raw file is huge! Need to read it in chunks, test for epistasis
-# and cache the results, discarding everything else to preserve memory
+
+@follows(convertToRawFormat)
+@transform(convertToRawFormat,
+           regex("epistasis.dir/(.+).raw"),
+           add_inputs("covariates.dir/WholeGenome.covar"),
+           r"epistasis.dir/\1.covar")
+def mergeGenotpyeAndCovariates(infiles, outfile):
+    '''
+    Merge covariates and target SNPs into a single
+    file
+    '''
+
+    snp_file = infiles[0]
+    covar_file = infiles[1]
+    covars = ",".join([covar_file, snp_file])
+    job_memory = "4G"
+
+    statement = '''
+    python /ifs/devel/projects/proj045/gwas_pipeline/pheno2pheno.py
+    --task=merge_covariates
+    --adjustment=snp
+    --covariate-file=%(covars)s
+    --log=%(outfile)s.log
+    > %(outfile)s
+    '''
+
+    P.run()
 
 
+@jobs_limit(2)
+@follows(mergeGenotpyeAndCovariates,
+         excludeLdVariants)
+@transform(excludeLdVariants,
+           regex("target_snps.dir/(.+).exclude"),
+           add_inputs([r"epistasis.dir/GwasHits.bed",
+                       r"epistasis.dir/GwasHits.fam",
+                       r"epistasis.dir/GwasHits.bim",
+                       mergeGenotpyeAndCovariates]),
+           r"epistasis.dir/\1.auto.R")
+def adjustedEpistasis(infiles, outfile):
+    '''
+    Test for epistasis between target SNPs
+    and SNPs of interest, whilst adjusting for
+    covariates.
+    '''
+
+    job_memory = "60G"
+    job_threads = 1
+
+    snp = infiles[0].split("/")[-1].split(".")[0]
+    ld_exclude = infiles[0]
+
+    bed_file = infiles[1][0]
+    fam_file = infiles[1][1]
+    bim_file = infiles[1][2]
+    plink_files = ",".join([bed_file, fam_file, bim_file])
+
+    covar_file = infiles[1][3]
+    covars = PARAMS['gwas_covars']
+    all_covars = ",".join([covars, snp])
+
+    out_pattern = ".".join(outfile.split(".")[:-2])
+
+    statement = '''
+    R CMD Rserve --vanilla; checkpoint;
+    python /ifs/devel/projects/proj045/gwas_pipeline/geno2assoc.py
+    --program=plinkdev
+    --input-file-format=plink_binary
+    --method=epistasis
+    --epistasis-method=adjusted
+    --epistasis-parameter=%(epistasis_plugin)s
+    --covariates-file=%(covar_file)s
+    --covariate-column=%(all_covars)s
+    --exclude-snps=%(ld_exclude)s
+    --min-allele-freq=0.005
+    --output-file-pattern=%(out_pattern)s
+    --log=%(outfile)s.log
+    --memory=%(job_memory)s
+    %(plink_files)s
+    > %(outfile)s.plink.log
+    '''
+
+    P.run()
+    
 
 # ----------------------------------------------------------------------------------------#
 # ----------------------------------------------------------------------------------------#
@@ -3104,11 +3184,9 @@ def getSnpFunctionalScores(infiles, outfile):
 
 @follows(splitGwasRegions,
          splitConditionalRegions,
-         getSnpFunctionalScores,
          mkdir("candidate_snps.dir"))
 @transform("hit_regions.dir/*_significant.tsv",
            regex("hit_regions.dir/(.+)_significant.tsv"),
-           add_inputs(r"scores.dir/\1_scores.tsv"),
            r"candidate_snps.dir/\1_PICS.tsv")
 def calcPicsScores(infiles, outfile):
     '''
@@ -3119,8 +3197,7 @@ def calcPicsScores(infiles, outfile):
     of P(B^causal | A^lead)
     '''
     
-    snp_file = infiles[0]
-    score_file = infiles[1]
+    snp_file = infiles
     chrome = snp_file.split("/")[-1].split("_")[0]
     chrome = chrome.lstrip("chr")
 
@@ -3128,7 +3205,6 @@ def calcPicsScores(infiles, outfile):
     python /ifs/devel/projects/proj045/gwas_pipeline/snpPriority.py
     --score-method=PICS
     --chromosome=%(chrome)s
-    --snp-set=%(score_file)s
     --distribution=normal
     --flat-prior
     --ld-dir=%(ld_dir)s

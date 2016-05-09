@@ -1809,7 +1809,8 @@ class Plink2(GWASProgram):
     def _detect_interactions(self, method=None, modifier=None,
                              set_file=None, set_mode=None,
                              report_threshold=None,
-                             sig_threshold=None):
+                             sig_threshold=None,
+                             covariates_file=None, covariates=None):
         '''
         Detect epistatic interactions between SNPs using either an inaccurate
         scan (fast-epistasis) or a fully saturated linear model
@@ -1827,11 +1828,15 @@ class Plink2(GWASProgram):
 
         two_locus - tests a single interaction between two variants using joint genotype
         counts and frequencies.
+
+        adjusted - allows adjustment for covariates in the interaction test, and also adjusts
+        for main effects from both the test and target SNP.  Requires and R plugin script.
         '''
 
         interact_map = {"fast_epistasis": " --fast-epistasis %s ",
                         "epistasis": " --epistasis %s ",
-                        "two_locus": " --twolocus %s "}
+                        "two_locus": " --twolocus %s ",
+                        "adjusted": " --R %s "}
 
         statement = []
 
@@ -1840,6 +1845,12 @@ class Plink2(GWASProgram):
         else:
             modifier = ""
             statement.append(interact_map[method] % modifier)
+
+        if covariates_file:
+            statement.append("--covar %s --covar-name %s " % (covariates_file,
+                                                              covariates))
+        else:
+            pass
 
         if set_mode and set_file:
             # does not work with two-locus test
@@ -1856,12 +1867,12 @@ class Plink2(GWASProgram):
         # alter reporting of significant interactions and significance
         # level of interactions
         if report_threshold:
-            statement.append(" --epi1 %0.3f " % report_threshold)
+            statement.append(" --epi1 %0.3f " % float(report_threshold))
         else:
             pass
 
         if sig_threshold:
-            statement.append(" --epi2 %0.3f " % sig_threshold)
+            statement.append(" --epi2 %0.3f " % float(sig_threshold))
         else:
             pass
 
@@ -4552,9 +4563,15 @@ def calculatePicsValues(snp_id, index_log10p, ld_values,
             # use log likelihoods, these are more numerically
             # stable and avoid the multiplication of very small
             # numbers
+            # if priors are not set, force uninformative prior
+            # i.e. if not conjugate with likelihood
             likelihood = np.log(stats.norm(mu, sigma).pdf(index_log10p))
-            prior = np.log(priors[snp])
-            prob_dict[snp] = np.exp(likelihood + prior)
+            if prior:
+                prior = np.log(priors[snp])
+            else:
+                prior = np.log(1.0)
+                prob_dict[snp] = np.exp(likelihood + prior)
+                
         except KeyError:
             E.warn("SNP %s not found in LD with %s" % (snp,
                                                        snp_id))

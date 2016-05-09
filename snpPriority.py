@@ -211,6 +211,13 @@ def main(argv=None):
             
             priors = snp_list
 
+        else:
+            # allow for no priors or scores to be set,
+            # use of priors will be ignored,
+            # i.e. when prior and likelihood are not from
+            # conjugate distributions
+            priors = None
+
         # PICS scores expects the gwas results file to
         # only contain the region of interest, which
         # represents an independent association signal
