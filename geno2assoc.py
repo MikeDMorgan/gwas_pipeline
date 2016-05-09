@@ -118,7 +118,8 @@ def main(argv=None):
                       "in the linear mixed model analysis")
 
     parser.add_option("--epistasis-method", dest="epi_method", type="choice",
-                      choices=["fast_epistasis", "epistasis", "two_locus"],
+                      choices=["fast_epistasis", "epistasis", "two_locus",
+                               "adjusted"],
                       help="epistasis method to use")
 
     parser.add_option("--epistasis-parameter", dest="epi_param", type="string",
@@ -507,8 +508,10 @@ def main(argv=None):
                                          modifier=options.epi_param,
                                          set_file=options.set_file,
                                          set_mode=options.set_method,
-                                         report_threshold=float(options.epi_report),
-                                         sig_threshold=float(options.epi_sig))
+                                         report_threshold=options.epi_report,
+                                         sig_threshold=options.epi_sig,
+                                         covariates_file=options.covariate_file,
+                                         covariates=options.covar_col)
     elif options.method == "reml":
         gwas_object.reml_analysis(method=options.reml_method,
                                   parameters=options.reml_param,

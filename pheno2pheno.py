@@ -66,6 +66,10 @@ def main(argv=None):
     parser.add_option("--R-script", dest="r_script", type="string",
                       help="R script for table reformatting")
 
+    parser.add_option("--adjustment", dest="adjust", type="choice",
+                      choices=["snp"],
+                      help="adjustements to make pre- or post mergeing")
+
     parser.add_option("--pheno-id", dest="dichot_var", type="string",
                       help="column header of variable to be dichotimised")
 
@@ -172,12 +176,35 @@ def main(argv=None):
             filelist = options.covar_file.split(",")
             df = pd.read_table(filelist.pop(0), sep="\t",
                                index_col=None, header=0)
+            if options.adjust == "snp":
+                re_snp = re.compile(".raw")
+                snp_file = [fil for fil in filelist if re.search(re_snp,
+                                                             fil)][0]
+                _df = pd.read_table(snp_file, sep="\t", header=0,
+                                    index_col=None)
+
+                cols = _df.columns[6:]
+                real_cols = list(_df.columns[:6])
+                snp_cols = [sc.split("_")[:-1][0] for sc in cols]
+
+                # list methods work in place, don't assign as a new variable
+                real_cols.extend(snp_cols)
+                _df.columns = real_cols
+                df = pd.merge(left=df, right=_df,
+                              on=["FID", "IID"],
+                              how='inner')
+                try:
+                    filelist.remove(snp_file)
+                except:
+                    pass
+
             for fle in filelist:
                 _df = pd.read_table(fle, sep="\t", header=0,
                                     index_col=None)
                 df = pd.merge(left=df, right=_df,
                               on=["FID", "IID"],
                               how='inner')
+                
 
             df.to_csv(options.stdout, index_col=None,
                       index=False, sep="\t")
