@@ -2154,7 +2154,7 @@ class GWASResults(object):
     and post-analysis QC
     '''
 
-    def __init__(self, assoc_file):
+    def __init__(self, assoc_file, **kwargs):
         # if the assoc_file is a list of multiple files,
         # then merge them into a single files
         if type(assoc_file) == list and len(assoc_file) > 1:
@@ -2167,7 +2167,7 @@ class GWASResults(object):
             self.infile = assoc_file
             self.infiles = None
             # results is a pandas dataframe to operate on
-            self.results = self.get_results(assoc_file)
+            self.results = self.get_results(assoc_file, **kwargs)
 
 
     def parse_genome_wide(self, association_files):
@@ -2190,7 +2190,8 @@ class GWASResults(object):
 
         return df
 
-    def get_results(self, association_file):
+    def get_results(self, association_file,
+                    epistasis=False):
         '''
         Parse a GWA results file and return the table
         '''
@@ -2203,6 +2204,7 @@ class GWASResults(object):
         # i.e. BP = int, P = float, SNP = str, etc
         # if the file has already been parsed and processed
         # just assign it instead
+        # epistasis results don't have a header
 
         try:
             peek = pd.read_table(association_file, nrows=5,
@@ -2214,17 +2216,39 @@ class GWASResults(object):
                                  sep="\t", header=0,
                                  index_col=None)
         
-        try:
-            assert peek["log10P"].any()
-            results_frame = pd.read_table(association_file,
-                                          sep="\t", header=0,
-                                          index_col=None,
-                                          dtype={"BP": np.int64,
-                                                 "CHR": np.int64,
-                                                 "NMISS": np.int64})
+
+        if epistasis:
+            try:
+                results_frame = pd.read_table(association_file,
+                                              sep="\s*", header=None,
+                                              index_col=None)
+            except StopIteration:
+                results_frame = pd.read_table(association_file,
+                                              sep="\t", header=None,
+                                              index_col=None)                
+            
+            results_frame.columns = ["CHR", "SNP", "BP", "A1", "OR",
+                                     "SE", "STAT", "P"]
+
+            results_frame.loc[:, "BP"] = pd.to_numeric(results_frame["BP"],
+                                                       errors="coerce")
+            results_frame.loc[:, "CHR"] = pd.to_numeric(results_frame["CHR"],
+                                                        errors="coerce")
+
             return results_frame
-        except KeyError:
-            pass
+
+        else:
+            try:
+                assert peek["log10P"].any()
+                results_frame = pd.read_table(association_file,
+                                              sep="\t", header=0,
+                                              index_col=None,
+                                              dtype={"BP": np.int64,
+                                                     "CHR": np.int64,
+                                                     "NMISS": np.int64})
+                return results_frame
+            except KeyError:
+                pass
 
         l_count = 0
         E.info("parsing file: %s" % association_file)
@@ -2338,18 +2362,33 @@ class GWASResults(object):
         r_df = py2ri.py2ri_pandasdataframe(self.results)
         R.assign("assoc.df", r_df)
         if resolution == "chromosome":
-            R('''p <- ggplot(assoc.df, aes(x=BP, y=-log10(P))) + geom_point() + '''
+            R('''assoc.df$CHR <- factor(assoc.df$CHR, '''
+              '''levels=levels(ordered(unique(assoc.df$CHR))),'''
+              '''labels=unique(paste0("chr", assoc.df$CHR)))''')
+            R('''nchrom <- length(unique(assoc.df$CHR))''')
+            R('''myCols <- rep(c("#ca0020", "#404040"), nchrom)[1:nchrom]''')
+            R('''names(myCols) <- sort(unique(assoc.df$CHR))''')
+            R('''colScale <- scale_colour_manual(name = "CHR", values=myCols)''')
+            R('''bp_indx <- seq_len(length(assoc.df$BP))''')
+            R('''bps <- assoc.df$BP''')
+            R('''names(bp_indx) <- bps''')
+            R('''assoc.df$BPI <- bp_indx''')
+            R('''p <- ggplot(assoc.df, aes(x=BP, y=-log10(P), colour=CHR)) + '''
+              '''geom_point(size=1) + colScale + '''
+              '''geom_hline(yintercept=8, linetype="dashed", colour="blue") + '''
               '''theme_bw() + labs(x="Chromosome position (bp)", '''
-              '''y="-log10 P-value")''')
-            R('''png("%s")''' % save_path)
+              '''y="-log10 P-value") + facet_grid(~CHR, scale="free_x") + '''
+              '''theme(axis.text.x = element_text(size=8))''')
+            R('''png("%s", res=90, unit="in", height=8, width=12)''' % save_path)
             R('''print(p)''')
             R('''dev.off()''')
 
         elif resolution == "genome_wide":
+            R('''nchroms <- length(unique(assoc.df$CHR))''')
             R('''png("%s", width=720, height=540)''' % save_path)
             R('''p <- manhattan(assoc.df, main="Manhattan plot",'''
               '''ylim=c(0, 50), cex=0.9, suggestiveline=T,'''
-              '''genomewideline=-log10(5e-8), chrlabs=c(1:22), '''
+              '''genomewideline=-log10(5e-8), chrlabs=c(1:nchroms), '''
               '''col=c("#8B1A1A","#8470FF"))''')
             R('''print(p)''')
             R('''dev.off()''')
@@ -2358,7 +2397,6 @@ class GWASResults(object):
             return self.results
         else:
             return False
-            
 
     def plotQQ(self, save_path, resolution="chromosome"):
         '''
@@ -2377,6 +2415,23 @@ class GWASResults(object):
         R('''png("%s", width=720, height=540)''' % save_path)
         R('''qq(assoc.df$P)''')
         R('''dev.off()''')
+
+    def plotEpistasis(self, save_path, resolution="chromosome"):
+        '''
+        Generate both manhattan plot of the SNPs tested for
+        epistasis with their target SNP, and a QQplot
+        of the association test p-values
+        '''
+
+        # plot QQplot
+        qq_save = "_".join([save_path, "_qqplot.png"])
+
+        self.plotQQ(qq_save)
+
+        manhattan_save = "_".join([save_path, "_manhattan.png"])
+        self.plotManhattan(manhattan_save,
+                           resolution=resolution,
+                           write_merged=False)        
 
     def getHits(self, threshold):
         '''
@@ -4566,9 +4621,9 @@ def calculatePicsValues(snp_id, index_log10p, ld_values,
             # if priors are not set, force uninformative prior
             # i.e. if not conjugate with likelihood
             likelihood = np.log(stats.norm(mu, sigma).pdf(index_log10p))
-            if prior:
+            try:
                 prior = np.log(priors[snp])
-            else:
+            except:
                 prior = np.log(1.0)
                 prob_dict[snp] = np.exp(likelihood + prior)
                 

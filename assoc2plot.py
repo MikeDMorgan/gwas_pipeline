@@ -52,7 +52,7 @@ def main(argv=None):
                       help="supply help")
 
     parser.add_option("--plot-type", dest="plot_type", type="choice",
-                      choices=["manhattan", "qqplot"],
+                      choices=["manhattan", "qqplot", "epistasis"],
                       help="plot type to generate")
 
     parser.add_option("--resolution", dest="resolution", type="choice",
@@ -68,13 +68,25 @@ def main(argv=None):
     # add common options (-h/--help, ...) and parse command line
     (options, args) = E.Start(parser, argv=argv)
 
+    parser.set_defaults(resolution="genome_wide",
+                        plot_type="manhattan")
+
     # if the input is a list of files, split them
     infile = argv[-1]
     infiles = infile.split(",")
+    
+    # need to parse epistasis output slightly differently
+    if options.plot_type == "epistasis":
+        epi = True
+    else:
+        epi = False
+
     if len(infiles) > 1:
-        results = gwas.GWASResults(assoc_file=infiles)
+        results = gwas.GWASResults(assoc_file=infiles,
+                                   epistasis=epi)
     elif len(infiles) == 1:
-        results = gwas.GWASResults(assoc_file=infile)
+        results = gwas.GWASResults(assoc_file=infile,
+                                   epistasis=epi)
     else:
         raise IOError("no input files detected, please specifiy association "
                       "results files as the last command line argument")
@@ -85,6 +97,9 @@ def main(argv=None):
     elif options.plot_type == "qqplot":
         results.plotQQ(save_path=options.save_path,
                        resolution=options.resolution)
+    elif options.plot_type == "epistasis":
+        results.plotEpistasis(save_path=options.save_path,
+                              resolution=options.resolution)
     else:
         pass
 

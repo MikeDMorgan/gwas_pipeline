@@ -2112,7 +2112,7 @@ def mergeGenotpyeAndCovariates(infiles, outfile):
     P.run()
 
 
-@jobs_limit(2)
+@jobs_limit(4)
 @follows(mergeGenotpyeAndCovariates,
          excludeLdVariants)
 @transform(excludeLdVariants,
@@ -2166,7 +2166,34 @@ def adjustedEpistasis(infiles, outfile):
     '''
 
     P.run()
-    
+
+
+@follows(adjustedEpistasis)
+@transform(adjustedEpistasis,
+           regex("epistasis.dir/(.+).auto.R"),
+           r"plots.dir/\1-epistasis_manhattan.png")
+def plotAdjustedEpistasis(infile, outfile):
+    '''
+    Generate a manhattan plot and QQplot
+    of the adjusted epistasis analysis
+    '''
+
+    job_memory = "4G"
+
+    plot_path = "_".join(outfile.split("_")[:-1])
+
+    statement = '''
+    python /ifs/devel/projects/proj045/gwas_pipeline/assoc2plot.py
+    --plot-type=epistasis
+    --resolution=chromosome
+    --log=%(outfile)s.log
+    --save-path=%(plot_path)s
+    %(infile)s
+    > %(outfile)s
+    '''
+
+    P.run()    
+
 
 # ----------------------------------------------------------------------------------------#
 # ----------------------------------------------------------------------------------------#
