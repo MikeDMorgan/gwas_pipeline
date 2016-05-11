@@ -1,6 +1,6 @@
 '''
-snps2architecture.py - template for CGAT scripts
-====================================================
+snps2architecture.py - Calculate & plot disease frequency by allele
+===================================================================
 
 :Author:
 :Release: $Id$
@@ -9,28 +9,55 @@ snps2architecture.py - template for CGAT scripts
 
 Purpose
 -------
+This script requires a Plink .ped file and .map file.  It calculates
+two sets of summary statistics:
+    1. frequency of cases carrying risk alleles
+    2. cumulative frequency of cases carrying risk alleles
 
-    # steps are:
-    # select SNPs that are also in gwas results
-    # recode A1 alleles as risk alleles
-    # set up case and control frequency arrays
-    # count risk alleles for each individual
-    # calculate P(Disease) for each risk allele bin
-    # plot
+It also generates a plot of the desired cases frequency against the
+number of risk alleles carried.
+
+This allows one to observe whether there exists a threshold effect
+at the genotype level for a trait.  For instance, if there is a
+sudden jump in the number of cases explained at a given allele
+carriage threshold.  This would provide evidence of a liability threshold
+trait.
+
+The steps are:
+  * select SNPs that are also in gwas results
+  * recode A1 alleles as risk alleles
+  * set up case and control frequency arrays
+  * count risk alleles for each individual
+  * calculate P(Disease) for each risk allele bin
+  * plot
 
 
-Usage
------
+Methods
+-------
+Options for `--method`.
 
-.. Example use case
+`cases_explained` - the frequency of cases carrying the given
+number of risk alleles.
+
+`probability_phenotype` - the frequency of the (binary) phenotype
+amongst all individuals, given the risk allele carriage
+
+Reporting & Plotting
+--------------------
+This is defined by the `--plot-statistic` option.
+
+`cumulative` - plot the cumulative frequency over the number of alleles
+
+`frequency` - plot the observed frequency of cases for each number of
+risk alleles
 
 Example::
 
-   python cgat_script_template.py
+   python snps2architecture.py
 
 Type::
 
-   python cgat_script_template.py --help
+   python snps2architecture.py --help
 
 for command line help.
 
@@ -94,7 +121,7 @@ def main(argv=None):
     parser.add_option("--flag-explained-recessive", dest="explained",
                       action="store_true",
                       help="flag individuals explained by carriage of "
-                      "2 risk alleles")
+                      "2 risk alleles - NOT IMPLIMENTED")
 
     # add common options (-h/--help, ...) and parse command line
     (options, args) = E.Start(parser, argv=argv)
