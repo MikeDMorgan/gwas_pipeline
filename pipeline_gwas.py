@@ -2112,7 +2112,6 @@ def mergeGenotpyeAndCovariates(infiles, outfile):
     P.run()
 
 
-@jobs_limit(4)
 @follows(mergeGenotpyeAndCovariates,
          excludeLdVariants)
 @transform(excludeLdVariants,

@@ -204,10 +204,14 @@ def main(argv=None):
                 df = pd.merge(left=df, right=_df,
                               on=["FID", "IID"],
                               how='inner')
-                
+            # python outputs NA as blank when writing to stdout,
+            # plink expects values, use string NAs
+            df = df.fillna("NA")
+            df.index = df["FID"]
+            df.drop(["FID"], inplace=True, axis=1)
 
-            df.to_csv(options.stdout, index_col=None,
-                      index=False, sep="\t")
+            df.to_csv(options.stdout, index_col=0,
+                      index_label="FID", sep="\t")
         else:
             E.warn("only a single covariates file provided."
                    "No merging possible, exiting")
