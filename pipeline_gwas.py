@@ -308,15 +308,17 @@ def plotPhenotypeMap(infile, outfile):
 # ----------------------------------------------------------------------------------------#
 # ----------------------------------------------------------------------------------------#
 # Specific pipeline tasks
+# need to allow for extra characters after chromsome ID
+
 @follows(mkdir("plink.dir"),
          dichotimisePhenotype)
 @collate("%s/*.%s" % (PARAMS['data_dir'],
                       PARAMS['data_suffix']),
          regex("%s/(.+)(\d+)(.+)\.%s" % (PARAMS['data_dir'],
-                                PARAMS['data_suffix'])),
+                                         PARAMS['data_suffix'])),
          add_inputs(r"%s/\1\2\3.%s" % (PARAMS['data_dir'],
-                                  PARAMS['data_aux'])),
-         r"plink.dir/\1\2\3.bed")
+                                       PARAMS['data_aux'])),
+         r"plink.dir/\1\2.bed")
 def convertToPlink(infiles, outfiles):
     '''
     Convert from other format
@@ -1750,10 +1752,10 @@ def splitRegionsFile(infile, outfile):
 @follows(splitRegionsFile)
 @transform("conditional.dir/*.tsv",
            regex("conditional.dir/(.+)-(.+)-(.+)_(.+).tsv"),
-           add_inputs([r"plink.dir/\1impv1.bed",
-                       r"plink.dir/\1impv1.bim",
-                       r"plink.dir/\1impv1.fam",
-                       r"plink.dir/\1impv1.exclude"]),
+           add_inputs([r"plink.dir/\1.bed",
+                       r"plink.dir/\1.bim",
+                       r"plink.dir/\1.fam",
+                       r"plink.dir/\1.exclude"]),
            r"conditional.dir/\1-\2-\3_\4.bed")
 def getConditionalRegions(infiles, outfile):
     '''
@@ -2111,7 +2113,7 @@ def mergeGenotpyeAndCovariates(infiles, outfile):
 
     P.run()
 
-
+@jobs_limit(6)
 @follows(mergeGenotpyeAndCovariates,
          excludeLdVariants)
 @transform(excludeLdVariants,
@@ -3182,7 +3184,7 @@ def makeSnpSets(infile, outfile):
          mkdir("scores.dir"))
 @transform(makeSnpSets,
            regex("snpsets.dir/chr(\d+)_(\d+)_(.+).snpset"),
-           add_inputs(r"%s/chr\1impv1.bim" % PARAMS['functional_bim_dir']),
+           add_inputs(r"%s/chr\1.bim" % PARAMS['functional_bim_dir']),
            r"scores.dir/chr\1_\2_\3_scores.tsv")
 def getSnpFunctionalScores(infiles, outfile):
     '''
@@ -3418,7 +3420,8 @@ def makeAbfCredibleSet(infile, outfile):
     P.run()
 
 
-@follows(makeAbfCredibleSet)
+@follows(makeAbfCredibleSet,
+         summarisePicsResults)
 @collate(makeAbfCredibleSet,
          regex("credible_sets.dir/(.+)_ABF.tsv"),
          r"credible_sets.dir/ABF.table")
