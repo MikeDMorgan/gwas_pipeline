@@ -4017,7 +4017,7 @@ def mergeQcExclusions(hets_file=None, inbred_file=None,
 
 
 def selectLdFromTabix(ld_dir, chromosome, snp_pos,
-                      ld_threshold=0):
+                      ld_threshold=0.01):
     '''
     Select all LD values from a tabix indexed BGZIP
     file of LD.  Assumes Plink format.
@@ -4087,11 +4087,13 @@ def selectLdFromTabix(ld_dir, chromosome, snp_pos,
                               keep="last",
                               inplace=True)
     except KeyError:
-        ld_df = pd.DataFrame(np.nan,
+        E.info("No SNPs detected in LD "
+               "with r^2 > {}".format(ld_threshold))
+
+        ld_df = pd.DataFrame(0.0,
                              index=[snp_pos],
                              columns=["SNP_A",
                                       "R2"])
-
     return ld_df
 
 
@@ -4626,7 +4628,6 @@ def calculatePicsValues(snp_id, index_log10p, ld_values,
             except:
                 prior = np.log(1.0)
                 prob_dict[snp] = np.exp(likelihood + prior)
-                
         except KeyError:
             E.warn("SNP %s not found in LD with %s" % (snp,
                                                        snp_id))
@@ -4808,7 +4809,6 @@ def PICSscore(gwas_results, chromosome, database=None,
                                       ld_values=ld_values,
                                       priors=priors,
                                       k=2)
-
     return PICS_scores
 
 

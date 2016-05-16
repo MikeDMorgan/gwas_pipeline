@@ -235,8 +235,6 @@ def main(argv=None):
         snpscores.sort_values(ascending=False,
                               inplace=True)
         post_snps = []
-        snpscores.to_csv("/ifs/projects/proj045/pipeline_gwas/PICS_test.tsv",
-                         sep="\t", index_label="SNP")
         for snp in snpscores.index:
             if posterior_sum < 99.0:
                 posterior_sum += snpscores.loc[snp]
