@@ -2478,6 +2478,7 @@ class GWASResults(object):
                     locus.sort_values(by="CHISQ", inplace=True)
 
                 index_bp = locus.iloc[0]["BP"]
+                E.info("Lead SNP for regions is: {}".format(locus.iloc[0]["SNP"]))
                 left_end = min(chr_df.loc[chr_df.index >= index_bp - 1500000, "BP"])
                 right_end = max(chr_df.loc[chr_df.index <= index_bp + 1500000, "BP"])
        
@@ -4917,7 +4918,7 @@ def LdRank(gwas_results, chromosome,
     # smallest integer greater than or equal to
     # the top %n SNPs
 
-    top = ceil(size * top_snps)
+    top = int(ceil(size * top_snps))
 
     top_ld = ld_values.iloc[0:top,]
 

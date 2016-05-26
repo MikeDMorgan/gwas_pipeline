@@ -218,7 +218,7 @@ def main(argv=None):
                       help="sort type to input files")
 
     parser.add_option("--merge-file-format", dest="merge_format", type="choice",
-                      choices=["plink", "binary_plink"],
+                      choices=["plink", "plink_binary"],
                       help="format of input files to be merged")
 
     parser.add_option("--merge-mode", dest="merge_mode", type="choice",

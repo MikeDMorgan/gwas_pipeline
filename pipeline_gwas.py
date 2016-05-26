@@ -1622,7 +1622,7 @@ def pcAdjustedAssociation(infiles, outfile):
     --keep=%(gwas_keep)s
     --remove-individuals=%(remove)s
     --association-method=%(gwas_model)s
-    --genotype-rate=0.1
+    --genotype-rate=0.05
     --hardy-weinberg=1e-50
     --min-allele-frequency=0.001
     --output-file-pattern=%(out_pattern)s
@@ -2113,9 +2113,71 @@ def mergeGenotpyeAndCovariates(infiles, outfile):
 
     P.run()
 
+
+@follows(excludeLdVariants)
+@transform(excludeLdVariants,
+           regex("target_snps.dir/(.+).exclude"),
+           add_inputs([r"epistasis.dir/GwasHits.bed",
+                       r"epistasis.dir/GwasHits.fam",
+                       r"epistasis.dir/GwasHits.bim"]),
+           r"epistasis.dir/\1.epi.cc")
+def ldExcludedEpistasis(infiles, outfile):
+    '''
+    Test for epistasis with a given variant derived
+    from a set file, exlcuding all variants
+    in LD.
+    Only test SNPs with MAF >= 0.5%
+    '''
+
+    job_memory = "60G"
+    job_threads = 1
+
+    snp = infiles[0].split("/")[-1].split(".")[0]
+    ld_exclude = infiles[0]
+
+    bed_file = infiles[1][0]
+    fam_file = infiles[1][1]
+    bim_file = infiles[1][2]
+    plink_files = ",".join([bed_file, fam_file, bim_file])
+
+    out_pattern = ".".join(outfile.split(".")[:-2])
+
+    # write the SNP id to a dummy set file
+    tmpf = P.getTempFilename(shared=True)
+    with open(tmpf, "w") as tfile:
+        tfile.write("VAR\n{}\nEND".format(snp))
+
+    statement = '''
+    python /ifs/devel/projects/proj045/gwas_pipeline/geno2assoc.py
+    --program=plink2
+    --input-file-format=plink_binary
+    --method=epistasis
+    --exclude-snps=%(ld_exclude)s
+    --epistasis-method=epistasis
+    --set-file=%(tmpf)s
+    --set-method="set-by-all"
+    --epistasis-threshold=%(epistasis_threshold)s
+    --epistasis-report-threshold=%(epistasis_reporting)s
+    --min-allele-freq=0.005
+    --output-file-pattern=%(out_pattern)s
+    --log=%(outfile)s.log
+    --threads=%(job_threads)s
+    --memory=60000
+    %(plink_files)s
+    > %(outfile)s.plink.log
+    '''
+
+    P.run()
+
+    statement = '''rm -rf %(tmpf)s'''
+
+    P.run()
+
+
 @jobs_limit(6)
 @follows(mergeGenotpyeAndCovariates,
-         excludeLdVariants)
+         excludeLdVariants,
+         ldExcludedEpistasis)
 @transform(excludeLdVariants,
            regex("target_snps.dir/(.+).exclude"),
            add_inputs([r"epistasis.dir/GwasHits.bed",
