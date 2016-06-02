@@ -2036,8 +2036,8 @@ def excludeLdVariants(infile, outfile):
     snp = infile.split("/")[-1].split(".")[0]
     job_memory = "2G"
 
-    statement = '''tabix %(ld_fle)s %(contig)s:89500000-90354753 | 
-    grep %(snp)s | awk '{ print } END {if (!NR) {print "Empty"} else {if($7 > 0.1) { print }}}'
+    statement = '''tabix %(ld_fle)s %(contig)s:87500000-90354753 | 
+    grep "%(snp)s" | awk '{ print } END {if (!NR) {print "Empty"} else {if($7 > 0.1) { print }}}'
     | cut -f 3,6 | tr -s '\\t' '\\n' | tr -s ';' '\\n' | sort | uniq | grep -v %(snp)s
     > %(outfile)s
     '''
@@ -2091,7 +2091,7 @@ def convertToRawFormat(infiles, outfile):
            regex("epistasis.dir/(.+).raw"),
            add_inputs("covariates.dir/WholeGenome.covar"),
            r"epistasis.dir/\1.covar")
-def mergeGenotpyeAndCovariates(infiles, outfile):
+def mergeGenotypeAndCovariates(infiles, outfile):
     '''
     Merge covariates and target SNPs into a single
     file
@@ -2120,6 +2120,68 @@ def mergeGenotpyeAndCovariates(infiles, outfile):
            add_inputs([r"epistasis.dir/GwasHits.bed",
                        r"epistasis.dir/GwasHits.fam",
                        r"epistasis.dir/GwasHits.bim"]),
+           r"epistasis.dir/single_\1.epi.cc")
+def ldExcludedEpistasisVsGwasLead(infiles, outfile):
+    '''
+    Test for epistasis between a given variant derived
+    from a set file, and only the lead SNPs from
+    a genome-wide analysis
+    '''
+
+    job_memory = "20G"
+    job_threads = 1
+
+    snp = infiles[0].split("/")[-1].split(".")[0]
+    ld_exclude = infiles[0]
+
+    bed_file = infiles[1][0]
+    fam_file = infiles[1][1]
+    bim_file = infiles[1][2]
+    plink_files = ",".join([bed_file, fam_file, bim_file])
+
+    out_pattern = ".".join(outfile.split(".")[:-2])
+    out_pattern = "single_" + out_pattern
+
+    # write the SNP id to a dummy set file
+    tmpf = P.getTempFilename(shared=True)
+    with open(tmpf, "w") as tfile:
+        tfile.write("VAR\n{}\nEND".format(snp))
+
+    statement = '''
+    python /ifs/devel/projects/proj045/gwas_pipeline/geno2assoc.py
+    --program=plink2
+    --input-file-format=plink_binary
+    --method=epistasis
+    --exclude-snps=%(ld_exclude)s
+    --epistasis-method=epistasis
+    --extract-snps=%(epistasis_hit_region)s
+    --set-file=%(tmpf)s
+    --set-method="set-by-all"
+    --epistasis-threshold=%(epistasis_threshold)s
+    --epistasis-report-threshold=%(epistasis_reporting)s
+    --min-allele-freq=0.005
+    --output-file-pattern=%(out_pattern)s
+    --log=%(outfile)s.log
+    --threads=%(job_threads)s
+    --memory=%(job_memory)s
+    %(plink_files)s
+    > %(outfile)s.plink.log
+    '''
+
+    P.run()
+
+    statement = '''rm -rf %(tmpf)s'''
+
+    P.run()
+    
+
+@follows(excludeLdVariants,
+         ldExcludedEpistasisVsGwasLead)
+@transform(excludeLdVariants,
+           regex("target_snps.dir/(.+).exclude"),
+           add_inputs([r"epistasis.dir/GwasHits.bed",
+                       r"epistasis.dir/GwasHits.fam",
+                       r"epistasis.dir/GwasHits.bim"]),
            r"epistasis.dir/\1.epi.cc")
 def ldExcludedEpistasis(infiles, outfile):
     '''
@@ -2129,7 +2191,7 @@ def ldExcludedEpistasis(infiles, outfile):
     Only test SNPs with MAF >= 0.5%
     '''
 
-    job_memory = "60G"
+    job_memory = "80G"
     job_threads = 1
 
     snp = infiles[0].split("/")[-1].split(".")[0]
@@ -2162,7 +2224,7 @@ def ldExcludedEpistasis(infiles, outfile):
     --output-file-pattern=%(out_pattern)s
     --log=%(outfile)s.log
     --threads=%(job_threads)s
-    --memory=60000
+    --memory=%(job_memory)s
     %(plink_files)s
     > %(outfile)s.plink.log
     '''
@@ -2174,8 +2236,35 @@ def ldExcludedEpistasis(infiles, outfile):
     P.run()
 
 
+@follows(ldExcludedEpistasis)
+@transform(ldExcludedEpistasis,
+           regex("epistasis.dir/rs(.+).epi.cc"),
+           r"plots.dir/rs\1-epistasis_manhattan.png")
+def plotLdExcludedEpistasis(infile, outfile):
+    '''
+    Generate a manhattan plot and QQplot
+    of the adjusted epistasis analysis
+    '''
+
+    job_memory = "4G"
+
+    plot_path = "_".join(outfile.split("_")[:-1])
+
+    statement = '''
+    python /ifs/devel/projects/proj045/gwas_pipeline/assoc2plot.py
+    --plot-type=epistasis
+    --resolution=chromosome
+    --log=%(outfile)s.log
+    --save-path=%(plot_path)s
+    %(infile)s
+    > %(outfile)s
+    '''
+
+    P.run()    
+
+
 @jobs_limit(6)
-@follows(mergeGenotpyeAndCovariates,
+@follows(mergeGenotypeAndCovariates,
          excludeLdVariants,
          ldExcludedEpistasis)
 @transform(excludeLdVariants,
@@ -2183,7 +2272,7 @@ def ldExcludedEpistasis(infiles, outfile):
            add_inputs([r"epistasis.dir/GwasHits.bed",
                        r"epistasis.dir/GwasHits.fam",
                        r"epistasis.dir/GwasHits.bim",
-                       mergeGenotpyeAndCovariates]),
+                       mergeGenotypeAndCovariates]),
            r"epistasis.dir/\1.auto.R")
 def adjustedEpistasis(infiles, outfile):
     '''

@@ -2220,20 +2220,25 @@ class GWASResults(object):
         if epistasis:
             try:
                 results_frame = pd.read_table(association_file,
-                                              sep="\s*", header=None,
+                                              sep="\s*", header=0,
                                               index_col=None)
             except StopIteration:
                 results_frame = pd.read_table(association_file,
                                               sep="\t", header=None,
-                                              index_col=None)                
+                                              index_col=None)
             
-            results_frame.columns = ["CHR", "SNP", "BP", "A1", "OR",
-                                     "SE", "STAT", "P"]
+            # results from fast epistasis are different to others
+            if results_frame.shape[1] == 7:
+                results_frame.columns = ["CHR1", "SNP1", "CHR",
+                                         "SNP", "OR", "STAT", "P"]
+            else:
+                results_frame.columns = ["CHR", "SNP", "BP", "A1", "OR",
+                                         "SE", "STAT", "P"]
 
-            results_frame.loc[:, "BP"] = pd.to_numeric(results_frame["BP"],
-                                                       errors="coerce")
-            results_frame.loc[:, "CHR"] = pd.to_numeric(results_frame["CHR"],
-                                                        errors="coerce")
+                results_frame.loc[:, "BP"] = pd.to_numeric(results_frame["BP"],
+                                                           errors="coerce")
+            results_frame.loc[:, "P"] = pd.to_numeric(results_frame["P"],
+                                                      errors="coerce")
 
             return results_frame
 
@@ -2244,7 +2249,6 @@ class GWASResults(object):
                                               sep="\t", header=0,
                                               index_col=None,
                                               dtype={"BP": np.int64,
-                                                     "CHR": np.int64,
                                                      "NMISS": np.int64})
                 return results_frame
             except KeyError:
@@ -2369,11 +2373,9 @@ class GWASResults(object):
             R('''myCols <- rep(c("#ca0020", "#404040"), nchrom)[1:nchrom]''')
             R('''names(myCols) <- sort(unique(assoc.df$CHR))''')
             R('''colScale <- scale_colour_manual(name = "CHR", values=myCols)''')
-            R('''bp_indx <- seq_len(length(assoc.df$BP))''')
-            R('''bps <- assoc.df$BP''')
-            R('''names(bp_indx) <- bps''')
+            R('''bp_indx <- seq_len(dim(assoc.df[1]))''')
             R('''assoc.df$BPI <- bp_indx''')
-            R('''p <- ggplot(assoc.df, aes(x=BP, y=-log10(P), colour=CHR)) + '''
+            R('''p <- ggplot(assoc.df, aes(x=BPI, y=-log10(P), colour=CHR)) + '''
               '''geom_point(size=1) + colScale + '''
               '''geom_hline(yintercept=8, linetype="dashed", colour="blue") + '''
               '''theme_bw() + labs(x="Chromosome position (bp)", '''
@@ -2424,11 +2426,11 @@ class GWASResults(object):
         '''
 
         # plot QQplot
-        qq_save = "_".join([save_path, "_qqplot.png"])
+        qq_save = "_".join([save_path, "qqplot.png"])
 
         self.plotQQ(qq_save)
 
-        manhattan_save = "_".join([save_path, "_manhattan.png"])
+        manhattan_save = "_".join([save_path, "manhattan.png"])
         self.plotManhattan(manhattan_save,
                            resolution=resolution,
                            write_merged=False)        
@@ -2467,24 +2469,31 @@ class GWASResults(object):
                 indi_group = region.groupby("Group")
 
             for group, locus in indi_group:
-                try:
+                # if there is only a single variant should
+                # the region be kept?  Likely a false
+                # positive
+                if min(locus["BP"]) == max(locus["BP"]):
+                    pass
+                else:
                     try:
-                        locus.loc[:, "STAT"] = abs(locus["STAT"])
-                        region.sort_values(by="STAT", inplace=True)
+                        try:
+                            locus.loc[:, "STAT"] = abs(locus["STAT"])
+                            locus.sort_values(by="STAT", inplace=True)
+                        except KeyError:
+                            locus.loc[:, "T"] = abs(locus["T"])
+                            locus.sort_values(by="STAT", inplace=True)
                     except KeyError:
-                        locus.loc[:, "T"] = abs(locus["T"])
-                        locus.sort_values(by="STAT", inplace=True)
-                except KeyError:
-                    locus.sort_values(by="CHISQ", inplace=True)
+                        locus.sort_values(by="CHISQ", inplace=True)
 
-                index_bp = locus.iloc[0]["BP"]
-                E.info("Lead SNP for regions is: {}".format(locus.iloc[0]["SNP"]))
-                left_end = min(chr_df.loc[chr_df.index >= index_bp - 1500000, "BP"])
-                right_end = max(chr_df.loc[chr_df.index <= index_bp + 1500000, "BP"])
+                    index_bp = locus.iloc[0]["BP"]
+                    E.info("Lead SNP for regions is: {}".format(locus.iloc[0]["SNP"]))
+                    left_end = min(chr_df.loc[chr_df.index >= index_bp - 1500000, "BP"])
+                    right_end = max(chr_df.loc[chr_df.index <= index_bp + 1500000, "BP"])
        
-                range_df = chr_df.loc[left_end : right_end, :]
+                    range_df = chr_df.loc[left_end : right_end, :]
+                    max_stat = max(abs(range_df["STAT"]))
 
-                yield contig, range_df
+                    yield contig, range_df
 
 
     def extractSNPs(self, snp_ids):

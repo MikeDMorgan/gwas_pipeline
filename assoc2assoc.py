@@ -90,6 +90,7 @@ def main(argv=None):
                     top_reg = region.sort_values(by="CHISQ",
                                                  ascending=False)
                     top_bp = top_reg.iloc[0]["BP"]
+                    top_snp = top_reg.iloc[0]["SNP"]
                 except KeyError:
                     top_reg = region
                     top_reg.loc[:, "STAT"] = abs(top_reg["STAT"])
