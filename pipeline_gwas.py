@@ -2128,7 +2128,7 @@ def ldExcludedEpistasisVsGwasLead(infiles, outfile):
     a genome-wide analysis
     '''
 
-    job_memory = "20G"
+    job_memory = "40G"
     job_threads = 1
 
     snp = infiles[0].split("/")[-1].split(".")[0]
@@ -2140,7 +2140,7 @@ def ldExcludedEpistasisVsGwasLead(infiles, outfile):
     plink_files = ",".join([bed_file, fam_file, bim_file])
 
     out_pattern = ".".join(outfile.split(".")[:-2])
-    out_pattern = "single_" + out_pattern
+    out_pattern = out_pattern
 
     # write the SNP id to a dummy set file
     tmpf = P.getTempFilename(shared=True)
@@ -2159,7 +2159,7 @@ def ldExcludedEpistasisVsGwasLead(infiles, outfile):
     --set-method="set-by-all"
     --epistasis-threshold=%(epistasis_threshold)s
     --epistasis-report-threshold=%(epistasis_reporting)s
-    --min-allele-freq=0.005
+    --min-allele-freq=0.001
     --output-file-pattern=%(out_pattern)s
     --log=%(outfile)s.log
     --threads=%(job_threads)s
