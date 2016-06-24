@@ -2363,6 +2363,7 @@ class GWASResults(object):
         R('''suppressPackageStartupMessages(library(ggplot2))''')
         R('''suppressPackageStartupMessages(library(scales))''')
         R('''suppressPackageStartupMessages(library(qqman))''')
+        R('''sink(file="sink.text")''')
         r_df = py2ri.py2ri_pandasdataframe(self.results)
         R.assign("assoc.df", r_df)
         if resolution == "chromosome":
@@ -2394,6 +2395,8 @@ class GWASResults(object):
               '''col=c("#8B1A1A","#8470FF"))''')
             R('''print(p)''')
             R('''dev.off()''')
+
+        R('''sink(file=NULL)''')
 
         if write_merged:
             return self.results
@@ -2539,6 +2542,75 @@ class GWASResults(object):
         regions_df = py2ri.ri2py_dataframe(R["out.df"])
 
         return regions_df
+
+    def mergeFrequencyResults(self, freq_dir, file_regex):
+        '''
+        Merge GWAS results with frequency information,
+        and format for GCTA joint analysis input
+        '''
+
+        # create a dummy regex to compare
+        # file_regex type against
+        test_re = re.compile("A")
+
+        if type(file_regex) == str:
+            file_regex = re.compile(file_regex)
+
+        elif type(file_regex) == type(test_re):
+            pass
+
+        else:
+            raise TypeError("Regex type not recognised.  Must"
+                            "be string or re.SRE_Pattern")
+
+        all_files = os.listdir(freq_dir)
+        freq_files = [fx for fx in all_files if re.search(file_regex, fx)]
+        
+        gwas_df = self.results
+
+        df_container = []
+        for freq in freq_files:
+            freq_file = os.path.join(freq_dir, freq)
+            E.info("Adding information from {}".format(freq_file))
+            # files may or may not be tab-delimited
+            try:
+                _df = pd.read_table(freq_file,
+                                     sep="\s*", header=0,
+                                     index_col=None,
+                                     engine='python')
+            except StopIteration:
+                _df = pd.read_table(freq_file,
+                                     sep="\t", header=0,
+                                     index_col=None)
+
+            merge_df = pd.merge(self.results, _df,
+                                left_on=["CHR", "SNP"],
+                                right_on=["CHR", "SNP"],
+                                how='left')
+            df_container.append(merge_df)            
+        
+
+        count = 0
+        for df in df_container:
+            if not count:
+                gwas_df = df
+                count += 1
+            else:
+                gwas_df = gwas_df.append(df)
+
+        E.info("Calculating Z scores and SEs")
+        z_scores = -0.862 + np.sqrt(0.743 - 0.2404 *\
+                                    np.log(gwas_df.loc[:, "P"]))
+        se = np.log(gwas_df.loc[:, "OR"])/z_scores
+        gwas_df.loc[:, "Z"] = z_scores
+        gwas_df.loc[:, "SE"] = se
+        gwas_df.loc[:, "logOR"] = np.log(gwas_df.loc[:, "OR"])
+
+        out_cols = ["SNP", "A1", "A2", "MAF", "logOR", "SE", "P", "NMISS"]
+
+        out_df = gwas_df[out_cols]
+
+        return out_df
 
 
 ##########################################################

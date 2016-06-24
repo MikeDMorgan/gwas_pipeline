@@ -1839,7 +1839,7 @@ def conditionalAssociation(infiles, outfile):
     --keep-individuals=%(gwas_keep)s
     --remove-individuals=%(remove)s
     --genotype-rate=0.1
-    --hardy-weinberg=0.000000001
+    --hardy-weinberg=1e-50
     --memory=%(job_memory)s
     --conditional-snp=%(conditional_snp)s
     --output-file-pattern=%(out_pattern)s
@@ -3123,8 +3123,7 @@ def convertRefVcf(infiles, outfile):
 
 
 @follows(convertRefVcf,
-         mkdir("ld.dir"),
-         splitRegionsFile)
+         mkdir("ld.dir"))
 @transform(convertRefVcf,
            regex("reference.dir/chr(.+)_ref.bed"),
            add_inputs([r"reference.dir/chr\1_ref.fam",
@@ -3597,6 +3596,39 @@ def summariseAbfResults(infiles, outfile):
 # ----------------------------------------------------------------------------------------#
 # ----------------------------------------------------------------------------------------#
 # ----------------------------------------------------------------------------------------#
+############################
+# Joint analysis of traits #
+############################
+
+@follows(plotGenomeManhattan,
+         mkdir("joint_analysis.dir"))
+@transform("gwas.dir/*.results",
+           regex("gwas.dir/(.+).results"),
+           r"joint_analysis.dir/\1.cojo")
+def transformGwasToCojo(infile, outfile):
+    '''
+    Process output from Plink GWAS into the required format
+    for a conditional and joint analysis using GCTA
+    '''
+
+    job_memory = "60G"
+    job_threads = 1
+
+    statement = '''
+    python /ifs/devel/projects/proj045/gwas_pipeline/assoc2assoc.py
+    --task=merge_freq
+    --frequency-directory=%()s
+    --log=%(outfile)s.log
+    %(infile)s
+    > %(outfile)s
+    '''
+
+    P.run()
+
+# ----------------------------------------------------------------------------------------#
+# ----------------------------------------------------------------------------------------#
+# ----------------------------------------------------------------------------------------#
+
 # DISSECT testing tasks
 
 

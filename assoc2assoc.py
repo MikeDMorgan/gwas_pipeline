@@ -16,7 +16,7 @@ Usage
 -----
 
 * `extract_results` - extract GWAS results for a specific SNP set
-
+* `merge_freq` - merge results with a .bim file to get allele information
 Example::
 
    python assoc2assoc.py
@@ -36,6 +36,7 @@ import sys
 import CGAT.Experiment as E
 import PipelineGWAS as gwas
 import CGAT.IOTools as IOTools
+import re
 
 
 def main(argv=None):
@@ -50,11 +51,9 @@ def main(argv=None):
     parser = E.OptionParser(version="%prog version: $Id$",
                             usage=globals()["__doc__"])
 
-    parser.add_option("-t", "--test", dest="test", type="string",
-                      help="supply help")
-
     parser.add_option("--task", dest="task", type="choice",
-                      choices=["get_hits", "extract_results"],
+                      choices=["get_hits", "extract_results",
+                               "merge_freq"],
                       help="task to perform")
 
     parser.add_option("--p-threshold", dest="p_threshold", type="float",
@@ -67,6 +66,10 @@ def main(argv=None):
     parser.add_option("--snp-set", dest="snpset", type="string",
                       help="file containing list of SNP per row to "
                       "extract from GWAS results")
+
+    parser.add_option("--frequency-directory", dest="freq_dir", type="string",
+                      help="Directory containing plink .frq files corresponding"
+                      " to all chromosomes")
 
     # add common options (-h/--help, ...) and parse command line
     (options, args) = E.Start(parser, argv=argv)
@@ -127,6 +130,13 @@ def main(argv=None):
         snp_df.drop_duplicates(subset=["SNP"], inplace=True)
         snp_df.to_csv(options.stdout, sep="\t", index=None)
 
+    elif options.task == "merge_freq":
+        # sequentially merge GWAS result with frequency data
+        # to make file for GCTA joint analysis
+        regex = re.compile("(\S+).frq$")
+        cojo_df = results.mergeFrequencyResults(options.freq_dir,
+                                                file_regex=regex)
+        cojo_df.to_csv(options.stdout, sep="\t", index=None)
     else:
         pass
 
