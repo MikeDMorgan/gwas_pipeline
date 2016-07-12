@@ -2565,7 +2565,7 @@ class GWASResults(object):
 
         all_files = os.listdir(freq_dir)
         freq_files = [fx for fx in all_files if re.search(file_regex, fx)]
-        
+
         gwas_df = self.results
 
         df_container = []
@@ -2606,9 +2606,14 @@ class GWASResults(object):
         gwas_df.loc[:, "SE"] = se
         gwas_df.loc[:, "logOR"] = np.log(gwas_df.loc[:, "OR"])
 
-        out_cols = ["SNP", "A1", "A2", "MAF", "logOR", "SE", "P", "NMISS"]
+        out_cols = ["SNP", "A1_x", "A2", "MAF", "logOR", "SE", "P", "NMISS"]
 
         out_df = gwas_df[out_cols]
+
+        # need to remove duplicates, especially those
+        # that contain NaN for A2 and MAF
+
+        out_df = out_df.loc[~np.isnan(out_df["MAF"])]
 
         return out_df
 

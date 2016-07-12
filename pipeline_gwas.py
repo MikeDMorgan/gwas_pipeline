@@ -3603,7 +3603,7 @@ def summariseAbfResults(infiles, outfile):
 @follows(plotGenomeManhattan,
          mkdir("joint_analysis.dir"))
 @transform("gwas.dir/*.results",
-           regex("gwas.dir/(.+).results"),
+           regex("gwas.dir/(.+)_adj.results"),
            r"joint_analysis.dir/\1.cojo")
 def transformGwasToCojo(infile, outfile):
     '''
@@ -3611,19 +3611,46 @@ def transformGwasToCojo(infile, outfile):
     for a conditional and joint analysis using GCTA
     '''
 
-    job_memory = "60G"
+    job_memory = "75G"
     job_threads = 1
 
     statement = '''
     python /ifs/devel/projects/proj045/gwas_pipeline/assoc2assoc.py
     --task=merge_freq
-    --frequency-directory=%()s
+    --frequency-directory=%(joint_freq_dir)s
     --log=%(outfile)s.log
     %(infile)s
     > %(outfile)s
     '''
 
     P.run()
+
+
+
+@follows(transformGwasToCojo,
+         calcPicsScores)
+@transform("plink.dir/chr*",
+           regex("plink.dir/(.+).bed"),
+           add_inputs([r"plink.dir/\1.fam",
+                       r"plink.dir/\1.bim",
+                       r"exclusions.dir/WholeGenome.gwas_exclude"]),
+           r"gwas.dir/\1_adj.assoc.%s" % PARAMS['gwas_model'])
+def jointAnalysisOfPhenotypes(infiles, outfile):
+    '''
+    Perform conditional analysis between two traits
+    on a subset of SNPs.  Requires GWAS results
+    from one phenotype, genotypes and phenotype
+    values for the second.
+    '''
+
+    job_memory = "75G"
+
+    statement = '''
+    --covariates-file=%(mlm_cont_covarfile)s
+    --discrete-covariates-file=%(mlm_discrete_covarfile)s
+    '''
+
+
 
 # ----------------------------------------------------------------------------------------#
 # ----------------------------------------------------------------------------------------#
