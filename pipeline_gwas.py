@@ -2350,6 +2350,57 @@ def plotAdjustedEpistasis(infile, outfile):
 # ----------------------------------------------------------------------------------------#
 # ----------------------------------------------------------------------------------------#
 # ----------------------------------------------------------------------------------------#
+# Analysis of pleiotropy using the Pleiotropy Estimation and Testing method
+# of Zhang et al Genetic Epidemiology 2014
+###########################################################################################
+# Requires SNPs in raw genotype (human readable) format, phenotypes and covariates
+
+@follows(convertToRawFormat,
+         mkdir("pleiotropy.dir"))
+@transform(convertToRawFormat,
+           regex("epistasis.dir/(.+).raw"),
+           add_inputs(["covariates.dir/WholeGenome.covar",
+                       selectBritish]),
+           r"pleiotropy.dir/\1.merged")
+def mergeForPleiotropy(infiles, outfile):
+    '''
+    Merge covariates, phenotype and target SNPs into a single
+    file
+    '''
+
+    snp_file = infiles[0]
+    covar_file = infiles[1][0]
+    pheno_file = infiles[1][1]
+    covars = ",".join([covar_file, snp_file, pheno_file])
+    job_memory = "4G"
+
+    statement = '''
+    python /ifs/devel/projects/proj045/gwas_pipeline/pheno2pheno.py
+    --task=merge_covariates
+    --adjustment=snp
+    --covariate-file=%(covars)s
+    --log=%(outfile)s.log
+    > %(outfile)s
+    '''
+
+    P.run()
+
+@follows(mergeForPleiotropy)
+@transform(mergeForPleiotropy,
+           suffix(".merged"),
+           ".pleiotropy")
+def calcPleiotropyTest(infile, outfile):
+    '''
+    Apply the PET-B method to genotype data for
+    two traits.
+    '''
+
+    pass           
+
+
+# ----------------------------------------------------------------------------------------#
+# ----------------------------------------------------------------------------------------#
+# ----------------------------------------------------------------------------------------#
 # mixed model analysis on a subsample of the data. Compute GRM from specific SNP set
 # take SNP set across limited region of MC1R??
 
@@ -3599,7 +3650,7 @@ def summariseAbfResults(infiles, outfile):
 ############################
 # Joint analysis of traits #
 ############################
-
+# Need to finish this or put it in a separate pipeline
 @follows(plotGenomeManhattan,
          mkdir("joint_analysis.dir"))
 @transform("gwas.dir/*.results",
@@ -3650,7 +3701,7 @@ def jointAnalysisOfPhenotypes(infiles, outfile):
     --discrete-covariates-file=%(mlm_discrete_covarfile)s
     '''
 
-
+    pass
 
 # ----------------------------------------------------------------------------------------#
 # ----------------------------------------------------------------------------------------#
