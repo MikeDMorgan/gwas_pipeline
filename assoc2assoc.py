@@ -118,6 +118,13 @@ def main(argv=None):
             out_file = "/".join([options.outdir, outfile])
             E.info("output association results from Chr%s to %s" %
                    (str(name), out_file))
+            # this keeps outputing the first column as unamed: 0,
+            # need to remove this
+            try:
+                region.drop([region.columns[0]], inplace=True, axis=1)
+            except:
+                pass
+
             region.to_csv(out_file, sep="\t", index=None)
 
     elif options.task == "extract_results":

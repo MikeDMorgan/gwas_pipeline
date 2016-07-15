@@ -119,7 +119,13 @@ def main(argv=None):
         pheno_df.to_csv(options.stdout, sep="\t", index_col=None)
 
     elif options.task == "dichotimise_phenotype":
-        df = pd.read_table(infile, sep="\t", header=0, index_col=None)
+        # catch situation where delimiter does is not tab
+        try:
+            df = pd.read_table(infile, sep="\t", header=0, index_col=None)
+            assert len(df.columns) > 1
+        except AssertionError:
+            df = pd.read_table(infile, sep="\s+", index_col=None)
+
         var = pd.Series(df[options.dichot_var].copy(), dtype=np.int64)
         ref = np.int64(options.ref_level)
         mask = var.isin([ref])
