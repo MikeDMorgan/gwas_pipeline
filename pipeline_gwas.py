@@ -2350,16 +2350,18 @@ def plotAdjustedEpistasis(infile, outfile):
 # ----------------------------------------------------------------------------------------#
 # ----------------------------------------------------------------------------------------#
 # ----------------------------------------------------------------------------------------#
-# Analysis of pleiotropy using the Pleiotropy Estimation and Testing method
-# of Zhang et al Genetic Epidemiology 2014
-###########################################################################################
+# Analysis of pleiotropy using the Pleiotropy Estimation and Testing method               #
+# of Zhang et al Genetic Epidemiology 2014                                                #
+# ----------------------------------------------------------------------------------------#
+# ----------------------------------------------------------------------------------------#
+# ----------------------------------------------------------------------------------------#
 # Requires SNPs in raw genotype (human readable) format, phenotypes and covariates
 
 @follows(convertToRawFormat,
          mkdir("pleiotropy.dir"))
 @transform(convertToRawFormat,
            regex("epistasis.dir/(.+).raw"),
-           add_inputs(["covariates.dir/WholeGenome.covar",
+           add_inputs(["covariates.dir/WholeGenome.merged",
                        selectBritish]),
            r"pleiotropy.dir/\1.merged")
 def mergeForPleiotropy(infiles, outfile):
@@ -2395,7 +2397,23 @@ def calcPleiotropyTest(infile, outfile):
     two traits.
     '''
 
-    pass           
+    job_memory = "40G"
+    job_threads = 1
+
+    statement = '''
+    python /ifs/devel/projects/proj045/gwas_pipeline/testPleiotropy.py
+    --trait1=%(pleiotropy_trait1)s
+    --trait2=%(pleiotropy_trait2)s
+    --covariates=%(gwas_covars)s
+    --resamples=%(pleiotropy_resamples)i
+    --trait1-model=%(pleiotropy_trait1_model)s
+    --trait2-model=%(pleiotropy_trait2_model)s
+    --log=%(outfile)s.log
+    %(infile)s
+    > %(outfile)s
+    '''
+
+    P.run()
 
 
 # ----------------------------------------------------------------------------------------#

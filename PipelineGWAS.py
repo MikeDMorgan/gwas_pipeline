@@ -2438,12 +2438,12 @@ class GWASResults(object):
                            resolution=resolution,
                            write_merged=False)        
 
-    def getHits(self, threshold):
+    def getHits(self, threshold=0.00000005):
         '''
         Pull out regions of association by selecting
         all SNPs with association p-values less than
         a certain threshold.  Defaults is genome-wide
-        signifance, p < 1x10-8.
+        signifance, p < 5x10-8.
         Then select region +/- 1.5Mb of the index SNP.
         '''
 
@@ -2535,7 +2535,7 @@ class GWASResults(object):
         # get distances then cluster, chop tree at 1x10^7bp
         R('''dist.mat <- dist(mat, method="euclidean")''')
         R('''clusts <- hclust(dist.mat, "average")''')
-        R('''cut <- cutree(clusts, h=1e7)''')
+        R('''cut <- cutree(clusts, h=1e6)''')
         R('''out.df <- rdf''')
         R('''out.df$Group <- cut''')
 

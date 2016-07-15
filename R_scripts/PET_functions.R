@@ -72,7 +72,7 @@ calcPleiotropyCorrelation <- function(trait1, trait2, residual.covar){
   trait2.sd <- sd(trait2)
   
   delta <- trait.covar - residual.covar
-  rho <- abs((delta)/(trait1.sd * trait2.sd))
+  rho <- (abs(delta)/(trait1.sd * trait2.sd))
 
   return(rho)  
 }
@@ -127,7 +127,7 @@ PETB <- function(data, trait1, trait2, genotypes, resamples,
   # assumes symmetry in distribution of bootstrapped
   # pcc values
   
-  pval <- sum(abs(boot.vals) > abs(boot.out$t0))/(boot.out$R)
+  pval <- sum(abs(boot.out$t0) > boot.vals)/(boot.out$R)
   
   return(c(boot.out$t0, pval))
 }
