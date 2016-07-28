@@ -2215,7 +2215,6 @@ class GWASResults(object):
             peek = pd.read_table(association_file, nrows=5,
                                  sep="\t", header=0,
                                  index_col=None)
-        
 
         if epistasis:
             try:

@@ -1700,7 +1700,8 @@ def plotGenomeManhattan(infiles, outfile):
 @follows(mkdir("plots.dir"),
          unadjustedAssociation,
          pcAdjustedAssociation,
-         plotUnadjustedManhattan)
+         plotUnadjustedManhattan,
+         plotGenomeManhattan)
 @collate(pcAdjustedAssociation,
          regex("gwas.dir/(.+)_adj.assoc.%s" % PARAMS['gwas_model']),
          r"plots.dir/WholeGenome_adj-qqplot.png")
@@ -2679,310 +2680,6 @@ def plotMixedModelQQ(infiles, outfile):
 
     P.run()
 
-# ----------------------------------------------------------------------------------------#
-# ----------------------------------------------------------------------------------------#
-# ----------------------------------------------------------------------------------------#
-# Variance components analysis on GWAS hit regions and observed epistatic interactions
-# Detect genetic overlap with additional traits by estimating h2 additive from GWAS and
-# epistasis regions.
-# get the top SNPs first
-
-
-@follows(mergeGwasHits,
-         plotGenomeManhattan,
-         mkdir("reml.dir"))
-@transform("gwas.dir/*.results",
-           regex("gwas.dir/(.+)_adj.results"),
-           r"reml.dir/GwasHits.snps")
-def getGwasTopHits(infile, outfile):
-    '''
-    Take the top SNPs with association p-values
-    below a given threshold.
-    '''
-
-    job_memory = "10G"
-    out_dir = "/".join(outfile.split("/")[:-1])
-
-    statement = '''
-    python /ifs/devel/projects/proj045/gwas_pipeline/assoc2assoc.py
-    --task=get_hits
-    --output-directory=%(out_dir)s
-    --log=%(outfile)s.log
-    --p-threshold=0.00000001
-    %(infile)s
-    '''
-
-    P.run()
-
-
-@follows(mergeGwasHits,
-         getGwasTopHits,
-         subSampleIndividuals,
-         mkdir("reml.dir"))
-@transform(mergeGwasHits,
-           regex("epistasis.dir/(.+).bed"),
-           add_inputs([r"epistasis.dir/\1.fam",
-                       r"epistasis.dir/\1.bim",
-                       subSampleIndividuals,
-                       getGwasTopHits]),
-           r"reml.dir/REML_Gwas.bed")
-def subsetCohortForReml(infiles, outfile):
-    '''
-    Subset the data prior to GRM calculation
-    and REML estimation of variance components
-    '''
-
-    bed_file = infiles[0]
-    fam_file = infiles[1][0]
-    bim_file = infiles[1][1]
-    plink_files = ",".join([bed_file, fam_file, bim_file])
-
-    keep_file = infiles[1][2]
-    snp_file = infiles[1][3]
-    job_memory = "40G"
-
-    out_pattern = ".".join(outfile.split(".")[:-1])
-
-    statement = '''
-    python /ifs/devel/projects/proj045/gwas_pipeline/geno2assoc.py
-    --program=plink2
-    --input-file-format=plink_binary
-    --method=format
-    --keep-individuals=%(keep_file)s
-    --extract-snps=%(snp_file)s
-    --min-allele-frequency=0.001
-    --format-method=change_format
-    --format-parameter=%(format_gender)s
-    --update-sample-attribute=gender
-    --reformat-type=plink_binary
-    --output-file-pattern=%(out_pattern)s
-    --log=%(outfile)s.log
-    %(plink_files)s
-    > %(outfile)s.plink.log
-    '''
-
-    P.run()
-
-
-@follows(subsetCohortForReml)
-@transform(subsetCohortForReml,
-           regex("reml.dir/(.+).bed"),
-           add_inputs([r"reml.dir/\1.fam",
-                       r"reml.dir/\1.bim"]),
-           r"reml.dir/\1.grm.N.bin")
-def makeRemlGrm(infiles, outfile):
-    '''
-    Generate the GRM across GWAS regions for
-    variance components analysis
-    '''
-
-    job_threads = PARAMS['grm_threads']
-    # memory per thread
-    job_memory = "10G"
-
-    bed_file = infiles[0]
-    fam_file = infiles[1][0]
-    bim_file = infiles[1][1]
-
-    plink_files = ",".join([bed_file, fam_file, bim_file])
-    out_pattern = ".".join(outfile.split(".")[:-3])
-
-    statement = '''
-    python /ifs/devel/projects/proj045/gwas_pipeline/geno2assoc.py
-    --program=gcta
-    --threads=%(job_threads)s
-    --input-file-format=plink_binary
-    --method=matrix
-    --matrix-compression=bin
-    --matrix-form=grm
-    --output-file-pattern=%(out_pattern)s
-    --log=%(outfile)s.log
-    %(plink_files)s
-    > %(outfile)s.gcta.log
-    '''
-
-    P.run()
-
-
-@follows(makeRemlGrm)
-@transform("reml.dir/*.fam",
-           regex("reml.dir/(.+).fam"),
-           r"reml.dir/\1.pheno")
-def subsetRemlPhenotype(infile, outfile):
-    '''
-    Generate a phenotype file from the subset
-    .fam file
-    '''
-
-    job_memory = "1G"
-
-    statement = '''
-    cat %(infile)s | tr " " "\\t" | cut -f1,2,6
-    > %(outfile)s
-    '''
-
-    P.run()
-
-
-@follows(makeRemlGrm,
-         subsetRemlPhenotype)
-@transform(makeRemlGrm,
-           regex("reml.dir/(.+).grm.N.bin"),
-           add_inputs([r"reml.dir/\1.grm.bin",
-                       r"reml.dir/\1.grm.id",
-                       r"reml.dir/\1.pheno"]),
-           r"reml.dir/\1.hsq")
-def calcHeritabilityReml(infiles, outfile):
-    '''
-    Use REML to perform variance components analysis
-    and estimate genetic contribution to trait
-    of interest
-    '''
-
-    n_file = infiles[0]
-    bin_file = infiles[1][0]
-    id_file = infiles[1][1]
-    grm_files = ",".join([n_file, bin_file, id_file])
-
-    pheno_file = infiles[1][2]
-    
-    job_threads = PARAMS['grm_threads']
-    job_memory = "10G"
-    out_pattern = ".".join(outfile.split(".")[:-1])
-
-    statement = '''
-    python /ifs/devel/projects/proj045/gwas_pipeline/geno2assoc.py
-    --input-file-format=GRM_binary
-    --program=gcta
-    --phenotypes-file=%(pheno_file)s
-    --pheno=1
-    --covariates-file=%(mlm_cont_covarfile)s
-    --discrete-covariates-file=%(mlm_discrete_covarfile)s
-    --method=reml
-    --reml-method=BLUP_EBV
-    --prevalence=0.05
-    --threads=%(job_threads)s
-    --output-file-pattern=%(out_pattern)s
-    --log=%(outfile)s.log
-    %(grm_files)s
-    > %(outfile)s.gcta.log
-    '''
-
-    P.run()
-
-
-@follows(calcHeritabilityReml)
-@transform("reml.dir/*.indi.blp",
-           regex("reml.dir/(.+).indi.blp"),
-           add_inputs([r"reml.dir/\1.bed",
-                       r"reml.dir/\1.fam",
-                       r"reml.dir/\1.bim"]),
-           r"reml.dir/\1.snp.blp")
-def snpBlup(infiles, outfile):
-    '''
-    SNP BLUP <- phenotypic variance explained
-    by each SNP that went into the GRM
-    '''
-
-    blup_file = infiles[0]
-    bed_file = infiles[1][0]
-    fam_file = infiles[1][1]
-    bim_file = infiles[1][2]
-    plink_files = ",".join([bed_file, fam_file, bim_file])
-
-    out_pattern = ".".join(outfile.split(".")[:-2])
-
-    job_memory = "20G"
-    
-    statement = '''
-    python /ifs/devel/projects/proj045/gwas_pipeline/geno2assoc.py
-    --program=gcta
-    --input-file-format=plink_binary
-    --method=reml
-    --reml-method=snpBLUP
-    --reml-parameters=%(blup_file)s
-    --output-file-pattern=%(out_pattern)s
-    --log=%(outfile)s.log
-    %(plink_files)s
-    > %(outfile)s.gcta.log
-    '''
-
-    P.run()
-
-
-@follows(makeRemlGrm)
-@transform("reml.dir/*.fam",
-           regex("reml.dir/(.+).fam"),
-           add_inputs("%s" % PARAMS['reml_phenos']),
-           r"reml.dir/\1_All.pheno")
-def subsetAllPhenotypes(infile, outfile):
-    '''
-    Subset the phenotypes file based
-    on the Plink .fam file
-    '''
-
-    job_memory = "5G"
-
-    fam_file = infiles[0]
-    pheno_file = infiles[1]
-
-    statement = '''
-    python /ifs/devel/projects/proj045/gwas_pipeline/pheno2pheno.py
-    --task=subset_phenotypes
-    --fam-file=%(fam_file)s
-    --log=%(outfile)s.log
-    %(pheno_file)s
-    > %(outfile)s
-    '''
-
-    P.run()
-
-
-@follows(makeRemlGrm,
-         subsetAllPhenotypes)
-@transform(makeRemlGrm,
-           regex("reml.dir/(.+).grm.N.bin"),
-           add_inputs([r"reml.dir/\1.grm.bin",
-                       r"reml.dir/\1.grm.id",
-                       "%s" % PARAMS['reml_phenos']]),
-           r"reml.dir/\1.hsq")
-def calcBivariateReml(infiles, outfile):
-    '''
-    Use REML to perform variance components analysis
-    and estimate genetic contribution to two
-    traits of interest
-    '''
-
-    n_file = infiles[0]
-    bin_file = infiles[1][0]
-    id_file = infiles[1][1]
-    grm_files = ",".join([n_file, bin_file, id_file])
-
-    pheno_file = infiles[1][2]
-    
-    job_threads = PARAMS['grm_threads']
-    job_memory = "10G"
-    out_pattern = ".".join(outfile.split(".")[:-1])
-
-    statement = '''
-    python /ifs/devel/projects/proj045/gwas_pipeline/geno2assoc.py
-    --input-file-format=GRM_binary
-    --program=gcta
-    --phenotypes-file=%(pheno_file)s
-    --pheno=1
-    --covariates-file=%(mlm_cont_covarfile)s
-    --discrete-covariates-file=%(mlm_discrete_covarfile)s
-    --method=reml
-    --reml-method=BLUP_EBV
-    --prevalence=0.05
-    --threads=%(job_threads)s
-    --output-file-pattern=%(out_pattern)s
-    --log=%(outfile)s.log
-    %(grm_files)s
-    > %(outfile)s.gcta.log
-    '''
-
-    P.run()
 
 # ----------------------------------------------------------------------------------------#
 # ----------------------------------------------------------------------------------------#
@@ -3661,6 +3358,340 @@ def summariseAbfResults(infiles, outfile):
     '''
 
     P.run()
+
+
+# ----------------------------------------------------------------------------------------#
+# ----------------------------------------------------------------------------------------#
+# ----------------------------------------------------------------------------------------#
+# Variance components analysis on GWAS hit regions and observed epistatic interactions
+# Detect genetic overlap with additional traits by estimating h2 additive from GWAS and
+# epistasis regions.
+# get the top SNPs first
+
+
+@follows(mergeGwasHits,
+         plotGenomeManhattan,
+         splitGwasRegions,
+         mkdir("reml.dir"))
+@collate("hit_regions.dir/*significant.tsv",
+         regex("hit_regions.dir/(.+)_(.+)_(.+)_significant.tsv"),
+         r"reml.dir/GwasHits.snps")
+def getGwasTopHits(infiles, outfile):
+    '''
+    Take the top SNPs with association p-values
+    below a given threshold.
+    '''
+
+    job_memory = "10G"
+    infiles = " ".join(infiles)
+
+    statement = '''
+    cat %(infiles)s | grep -v "SNP" | cut -f 7
+    > %(outfile)s
+    '''
+
+    P.run()
+
+
+@follows(getGrmRegion)
+@transform("epistasis.dir/*.fam",
+           regex("epistasis.dir/(.+).fam"),
+           add_inputs("%s" % PARAMS['gwas_keep']),
+           r"reml.dir/\1.keep")
+def subSampleIndividualsForReml(infiles, outfile):
+    '''
+    Subsample from the total population
+    to get ~n individuals for linear
+    model analysis.  
+    Output with combined list of ethnically
+    selected individuals
+    '''
+
+    fam_file = infiles[0]
+    keep_file = infiles[1]
+    keep_temp = P.getTempFilename(shared=True)
+    fam_temp = P.getTempFilename(shared=True)
+
+    statement = '''
+    cat %(keep_file)s | tr -s " " "\\t" | cut -f1,2 | sort | grep -v "FID" > %(keep_temp)s;
+    cat %(fam_file)s | tr " " "\\t" | cut -f1,2 | sort > %(fam_temp)s;
+    comm -12 %(fam_temp)s %(keep_temp)s | shuf -n %(mlm_subsample)s
+    > %(outfile)s;
+    rm -rf %(keep_temp)s %(fam_temp)s
+    '''
+
+    P.run()
+
+
+@follows(mergeGwasHits,
+         getGwasTopHits,
+         subSampleIndividualsForReml,
+         mkdir("reml.dir"))
+@transform(mergeGwasHits,
+           regex("epistasis.dir/(.+).bed"),
+           add_inputs([r"epistasis.dir/\1.fam",
+                       r"epistasis.dir/\1.bim",
+                       subSampleIndividualsForReml,
+                       getGwasTopHits]),
+           r"reml.dir/REML_Gwas.bed")
+def subsetCohortForReml(infiles, outfile):
+    '''
+    Subset the data prior to GRM calculation
+    and REML estimation of variance components
+    '''
+
+    bed_file = infiles[0]
+    fam_file = infiles[1][0]
+    bim_file = infiles[1][1]
+    plink_files = ",".join([bed_file, fam_file, bim_file])
+
+    keep_file = infiles[1][2]
+    snp_file = infiles[1][3]
+    job_memory = "40G"
+
+    out_pattern = ".".join(outfile.split(".")[:-1])
+
+    statement = '''
+    python /ifs/devel/projects/proj045/gwas_pipeline/geno2assoc.py
+    --program=plink2
+    --input-file-format=plink_binary
+    --method=format
+    --keep-individuals=%(keep_file)s
+    --extract-snps=%(snp_file)s
+    --min-allele-frequency=0.001
+    --format-method=change_format
+    --format-parameter=%(format_gender)s
+    --update-sample-attribute=gender
+    --reformat-type=plink_binary
+    --output-file-pattern=%(out_pattern)s
+    --log=%(outfile)s.log
+    %(plink_files)s
+    > %(outfile)s.plink.log
+    '''
+
+    P.run()
+
+
+@follows(subsetCohortForReml)
+@transform(subsetCohortForReml,
+           regex("reml.dir/(.+).bed"),
+           add_inputs([r"reml.dir/\1.fam",
+                       r"reml.dir/\1.bim"]),
+           r"reml.dir/\1.grm.N.bin")
+def makeRemlGrm(infiles, outfile):
+    '''
+    Generate the GRM across GWAS regions for
+    variance components analysis
+    '''
+
+    job_threads = PARAMS['grm_threads']
+    # memory per thread
+    job_memory = "10G"
+
+    bed_file = infiles[0]
+    fam_file = infiles[1][0]
+    bim_file = infiles[1][1]
+
+    plink_files = ",".join([bed_file, fam_file, bim_file])
+    out_pattern = ".".join(outfile.split(".")[:-3])
+
+    statement = '''
+    python /ifs/devel/projects/proj045/gwas_pipeline/geno2assoc.py
+    --program=gcta
+    --threads=%(job_threads)s
+    --input-file-format=plink_binary
+    --method=matrix
+    --matrix-compression=bin
+    --matrix-form=grm
+    --output-file-pattern=%(out_pattern)s
+    --log=%(outfile)s.log
+    %(plink_files)s
+    > %(outfile)s.gcta.log
+    '''
+
+    P.run()
+
+
+@follows(makeRemlGrm)
+@transform("reml.dir/*.fam",
+           regex("reml.dir/(.+).fam"),
+           r"reml.dir/\1.pheno")
+def subsetRemlPhenotype(infile, outfile):
+    '''
+    Generate a phenotype file from the subset
+    .fam file
+    '''
+
+    job_memory = "1G"
+
+    statement = '''
+    cat %(infile)s | tr " " "\\t" | cut -f1,2,6
+    > %(outfile)s
+    '''
+
+    P.run()
+
+
+@follows(makeRemlGrm,
+         subsetRemlPhenotype)
+@transform(makeRemlGrm,
+           regex("reml.dir/(.+).grm.N.bin"),
+           add_inputs([r"reml.dir/\1.grm.bin",
+                       r"reml.dir/\1.grm.id",
+                       r"reml.dir/\1.pheno"]),
+           r"reml.dir/\1.hsq")
+def calcHeritabilityReml(infiles, outfile):
+    '''
+    Use REML to perform variance components analysis
+    and estimate genetic contribution to trait
+    of interest
+    '''
+
+    n_file = infiles[0]
+    bin_file = infiles[1][0]
+    id_file = infiles[1][1]
+    grm_files = ",".join([n_file, bin_file, id_file])
+
+    pheno_file = infiles[1][2]
+    
+    job_threads = PARAMS['grm_threads']
+    job_memory = "10G"
+    out_pattern = ".".join(outfile.split(".")[:-1])
+
+    statement = '''
+    python /ifs/devel/projects/proj045/gwas_pipeline/geno2assoc.py
+    --input-file-format=GRM_binary
+    --program=gcta
+    --phenotypes-file=%(pheno_file)s
+    --pheno=1
+    --covariates-file=%(mlm_cont_covarfile)s
+    --discrete-covariates-file=%(mlm_discrete_covarfile)s
+    --method=reml
+    --reml-method=BLUP_EBV
+    --prevalence=%(reml_prevalence)f
+    --threads=%(job_threads)s
+    --output-file-pattern=%(out_pattern)s
+    --log=%(outfile)s.log
+    %(grm_files)s
+    > %(outfile)s.gcta.log
+    '''
+
+    P.run()
+
+
+@follows(calcHeritabilityReml)
+@transform("reml.dir/*.indi.blp",
+           regex("reml.dir/(.+).indi.blp"),
+           add_inputs([r"reml.dir/\1.bed",
+                       r"reml.dir/\1.fam",
+                       r"reml.dir/\1.bim"]),
+           r"reml.dir/\1.snp.blp")
+def snpBlup(infiles, outfile):
+    '''
+    SNP BLUP <- phenotypic variance explained
+    by each SNP that went into the GRM
+    '''
+
+    blup_file = infiles[0]
+    bed_file = infiles[1][0]
+    fam_file = infiles[1][1]
+    bim_file = infiles[1][2]
+    plink_files = ",".join([bed_file, fam_file, bim_file])
+
+    out_pattern = ".".join(outfile.split(".")[:-2])
+
+    job_memory = "20G"
+    
+    statement = '''
+    python /ifs/devel/projects/proj045/gwas_pipeline/geno2assoc.py
+    --program=gcta
+    --input-file-format=plink_binary
+    --method=reml
+    --reml-method=snpBLUP
+    --reml-parameters=%(blup_file)s
+    --output-file-pattern=%(out_pattern)s
+    --log=%(outfile)s.log
+    %(plink_files)s
+    > %(outfile)s.gcta.log
+    '''
+
+    P.run()
+
+
+@follows(makeRemlGrm)
+@transform("reml.dir/*.fam",
+           regex("reml.dir/(.+).fam"),
+           add_inputs("%s" % PARAMS['reml_phenos']),
+           r"reml.dir/\1_All.pheno")
+def subsetAllPhenotypes(infile, outfile):
+    '''
+    Subset the phenotypes file based
+    on the Plink .fam file
+    '''
+
+    job_memory = "5G"
+
+    fam_file = infiles[0]
+    pheno_file = infiles[1]
+
+    statement = '''
+    python /ifs/devel/projects/proj045/gwas_pipeline/pheno2pheno.py
+    --task=subset_phenotypes
+    --fam-file=%(fam_file)s
+    --log=%(outfile)s.log
+    %(pheno_file)s
+    > %(outfile)s
+    '''
+
+    P.run()
+
+
+@follows(makeRemlGrm,
+         subsetAllPhenotypes)
+@transform(makeRemlGrm,
+           regex("reml.dir/(.+).grm.N.bin"),
+           add_inputs([r"reml.dir/\1.grm.bin",
+                       r"reml.dir/\1.grm.id",
+                       "%s" % PARAMS['reml_phenos']]),
+           r"reml.dir/\1.hsq")
+def calcBivariateReml(infiles, outfile):
+    '''
+    Use REML to perform variance components analysis
+    and estimate genetic contribution to two
+    traits of interest
+    '''
+
+    n_file = infiles[0]
+    bin_file = infiles[1][0]
+    id_file = infiles[1][1]
+    grm_files = ",".join([n_file, bin_file, id_file])
+
+    pheno_file = infiles[1][2]
+    
+    job_threads = PARAMS['grm_threads']
+    job_memory = "10G"
+    out_pattern = ".".join(outfile.split(".")[:-1])
+
+    statement = '''
+    python /ifs/devel/projects/proj045/gwas_pipeline/geno2assoc.py
+    --input-file-format=GRM_binary
+    --program=gcta
+    --phenotypes-file=%(pheno_file)s
+    --pheno=1
+    --covariates-file=%(mlm_cont_covarfile)s
+    --discrete-covariates-file=%(mlm_discrete_covarfile)s
+    --method=reml
+    --reml-method=BLUP_EBV
+    --prevalence=0.05
+    --threads=%(job_threads)s
+    --output-file-pattern=%(out_pattern)s
+    --log=%(outfile)s.log
+    %(grm_files)s
+    > %(outfile)s.gcta.log
+    '''
+
+    P.run()
+
 
 # ----------------------------------------------------------------------------------------#
 # ----------------------------------------------------------------------------------------#
