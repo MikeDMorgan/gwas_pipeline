@@ -1,0 +1,33 @@
+PLINK v1.90b3.29 64-bit (24 Dec 2015)
+Options in effect:
+  --bfile /ifs/projects/proj045/pipeline_gwas_adjustSkin/plink.dir/chr16
+  --extract get_these_snps
+  --freq
+  --keep /ifs/projects/proj045/pipeline_gwas/phenotypes.dir/ukb4882_British.tsv
+  --mpheno 1
+  --out freqs.dir/chr16
+  --pheno /ifs/projects/proj045/pipeline_gwas/phenotypes.dir/ukb4882.pheno
+  --remove /ifs/projects/proj045/pipeline_gwas/exclusions.dir/WholeGenome.gwas_exclude
+
+Hostname: cgath1.anat.ox.ac.uk
+Working directory: /ifs/devel/projects/proj045/gwas_pipeline/tests/assoc2assoc.py
+Start time: Fri Jul 29 11:28:58 2016
+
+Random number seed: 1469788138
+387494 MB RAM detected; reserving 193747 MB for main workspace.
+Allocated 81736 MB successfully, after larger attempt(s) failed.
+2379485 variants loaded from .bim file.
+152249 people (71547 males, 80702 females) loaded from .fam.
+136748 phenotype values present after --pheno.
+--extract: 1995 variants remaining.
+Warning: At least 6 duplicate IDs in --extract file.
+--keep: 136748 people remaining.
+--remove: 113491 people remaining.
+Warning: At least 1 duplicate ID in --remove file.
+Using 1 thread (no multithreaded calculations invoked.
+Before main variant filters, 113491 founders and 0 nonfounders present.
+Calculating allele frequencies... done.
+Total genotyping rate in remaining samples is 0.989487.
+--freq: Allele frequencies (founders only) written to freqs.dir/chr16.frq .
+
+End time: Fri Jul 29 11:29:04 2016
