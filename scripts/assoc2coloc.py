@@ -69,6 +69,10 @@ Options
 `--restrict-from/to` - Restrict the colocalization testing to a specific
                      genomic region. Must also provide `--chromosome`.
 
+`--trait1/2-p-column` - provide an alternative P-value column header
+
+`--trait1/1-prevalence` - The population prevalence of the trait if binary
+
 
 Type::
 
@@ -151,8 +155,8 @@ def testColoc(trait1, trait2, trait1_type, trait2_type,
 
     # push all elements into the R environment
     R('''sink(file="sink.text")''')
-    R('''library(coloc)''')
-    R('''source("/ifs/devel/projects/proj045/finemapping_pipeline/R_scripts/coloQtl.R")''')
+    R('''suppressPackageStartupMessages(library(coloc))''')
+    R('''source("/ifs/devel/projects/proj045/gwas_pipeline/R_scripts/coloQtl.R")''')
     
     E.info("Pushing results tables into R environment")
     py2ri.activate()
@@ -359,14 +363,20 @@ def main(argv=None):
                           "SNP, NMISS or P columns")
 
     E.info("Parsing MAF table file: {}".format(options.maf_table))
+    if options.maf_table.endswith(".gz"):
+        maf_comp = "gzip"
+    else:
+        maf_comp = None
     try:
         maf_peek = pd.read_table(options.maf_table, nrows=5,
                                  sep="\s*", header=0,
                                  index_col=None,
+                                 compression=maf_comp,
                                  engine='python')
     except StopIteration:
         maf_peek = pd.read_table(options.maf_table, nrows=5,
                                  sep="\t", header=0,
+                                 compression=maf_comp,
                                  index_col=None)
     try:
         len_cols = len(set(maf_peek.columns).intersection(["{}".format(options.maf_snpcol),
@@ -381,11 +391,13 @@ def main(argv=None):
     trait1_results = pd.read_table(options.trait1_res,
                                    sep=trait1_sep,
                                    header=0,
+                                   compression=trait1_comp,
                                    index_col=None)
 
     trait2_results = pd.read_table(options.trait2_res,
                                    sep=trait2_sep,
                                    header=0,
+                                   compression=trait2_comp,
                                    index_col=None)
     if options.trait1_pcol != "P":
         trait1_results.loc[:, "P"] = trait1_results[:, options.trait1_pcol]
@@ -400,6 +412,7 @@ def main(argv=None):
     maf_table = pd.read_table(options.maf_table,
                               sep=maf_sep,
                               header=0,
+                              compression=maf_comp,
                               index_col=None)
 
     if options.maf_snpcol != "SNP":
@@ -427,7 +440,7 @@ def main(argv=None):
                        start=options.restrict_from,
                        end=options.restrict_to)
 
-    out_df.to_csv(options.stdout, index_label="Gene",
+    out_df.to_csv(options.stdout, index_label="Trait",
                   sep="\t")
 
     # write footer and output benchmark information.
