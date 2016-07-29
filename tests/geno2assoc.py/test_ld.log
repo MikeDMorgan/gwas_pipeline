@@ -1,0 +1,30 @@
+PLINK v1.90b3.29 64-bit (24 Dec 2015)
+Options in effect:
+  --bfile /ifs/devel/projects/proj045/gwas_pipeline/tests/geno2assoc.py/chr20
+  --ld-window-r2 0.200
+  --memory 60000
+  --out /ifs/devel/projects/proj045/gwas_pipeline/tests/geno2assoc.py/test_ld
+  --r2 inter-chr gz dprime
+  --threads 1
+
+Hostname: cgath1.anat.ox.ac.uk
+Working directory: /tmp/tmplaYoym
+Start time: Fri Jul 29 17:49:57 2016
+
+Random number seed: 1469810997
+387494 MB RAM detected; reserving 60000 MB for main workspace.
+4470 variants loaded from .bim file.
+5000 people (2425 males, 2575 females) loaded from .fam.
+4694 phenotype values loaded from .fam.
+Using 1 thread.
+Before main variant filters, 5000 founders and 0 nonfounders present.
+Calculating allele frequencies... done.
+Total genotyping rate is 0.995281.
+4470 variants and 5000 people pass filters and QC.
+Among remaining phenotypes, 215 are cases and 4479 are controls.  (306
+phenotypes are missing.)
+--r2 inter-chr dprime... done.
+Results written to
+/ifs/devel/projects/proj045/gwas_pipeline/tests/geno2assoc.py/test_ld.ld.gz .
+
+End time: Fri Jul 29 17:50:03 2016
